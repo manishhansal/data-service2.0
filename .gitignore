@@ -1,0 +1,114 @@
+# =============================================================================
+# DATA-SERVICE 2.0 — .gitignore
+# Requirement 19.1: plaintext credentials must never be committed.
+# =============================================================================
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+# NEVER commit .env files that contain real credentials.
+# .env.example (with placeholder values only) is committed.
+.env
+.env.local
+.env.production
+.env.staging
+.env.staging.*
+.env.production.tmp
+.env.tmp
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# ── Kiro spec files (.kiro/) ──────────────────────────────────────────────────
+# .kiro/ contains the project specification (requirements.md, design.md, tasks.md).
+# It is part of the source of truth — COMMITTED to git by default.
+# Uncomment the line below ONLY if you want to exclude the spec from version control.
+# .kiro/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.installed.cfg
+MANIFEST
+*.whl
+*.tar.gz
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ── Testing / coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+coverage/
+htmlcov/
+.hypothesis/
+.tox/
+junit.xml
+test-results/
+
+# ── Type checking ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+pyrightconfig.json
+
+# ── Linting / formatting ──────────────────────────────────────────────────────
+.ruff_cache/
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# ── Docker volumes / local runtime data ───────────────────────────────────────
+docker/volumes/
+docker/data/
+*.log
+logs/
+
+# ── Database local files ──────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Alembic ───────────────────────────────────────────────────────────────────
+# Keep versions/ scripts, ignore compiled cache inside them
+alembic/versions/__pycache__/
+
+# ── Locust / performance test results ─────────────────────────────────────────
+locust_results/
+*.stats.csv
+*.exceptions.csv
+
+# ── Documentation build output ────────────────────────────────────────────────
+docs/_build/
+docs/.doctrees/
+site/
+
+# ── Jupyter notebooks (data exploration) ──────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS / system files ─────────────────────────────────────────────────────────
+.Spotlight-V100
+.Trashes
+ehthumbs.db

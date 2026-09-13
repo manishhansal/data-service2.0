@@ -1,0 +1,263 @@
+# =============================================================================
+# DATA-SERVICE 2.0 — Docker Compose
+# Requirements: 20.1, 20.2, 19.1
+#
+# Services:
+#   api        — FastAPI application (port 8200)
+#   worker     — Background worker (backfill, gap recovery)
+#   scheduler  — Cron scheduler (08:45 IST F&O refresh, 23:55 IST JWT rotation)
+#   redis      — Redis 7 (L2 cache + Event Bus + distributed state)
+#   postgres   — TimescaleDB on PostgreSQL 15 (persistent storage)
+#
+# Usage:
+#   cp .env.example .env && $EDITOR .env   # fill in secrets
+#   docker compose up -d
+#   docker compose logs -f api
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # API service — FastAPI + Uvicorn (4 workers)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: data-service:2.0.0
+    container_name: data-service-api
+    restart: unless-stopped
+    ports:
+      - "${DATA_SERVICE_PORT:-8200}:8200"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      # ── Server ──────────────────────────────────────────────────────────
+      DATA_SERVICE_PORT: "${DATA_SERVICE_PORT:-8200}"
+      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      UVICORN_WORKERS: "${UVICORN_WORKERS:-4}"
+
+      # ── Infrastructure ───────────────────────────────────────────────────
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-mds_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mds}"
+
+      # ── Circuit breaker ──────────────────────────────────────────────────
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD: "${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}"
+      CIRCUIT_BREAKER_RECOVERY_WINDOW_SEC: "${CIRCUIT_BREAKER_RECOVERY_WINDOW_SEC:-60}"
+
+      # ── Cache ────────────────────────────────────────────────────────────
+      CACHE_L1_MAX_ENTRIES: "${CACHE_L1_MAX_ENTRIES:-10000}"
+
+      # ── Provider queue ───────────────────────────────────────────────────
+      PROVIDER_QUEUE_MAX_DEPTH: "${PROVIDER_QUEUE_MAX_DEPTH:-100}"
+
+      # ── Gap recovery ─────────────────────────────────────────────────────
+      GAP_RECOVERY_MAX_ATTEMPTS: "${GAP_RECOVERY_MAX_ATTEMPTS:-5}"
+
+      # ── Backfill chunk sizes ─────────────────────────────────────────────
+      BACKFILL_CHUNK_ANGEL_1M_DAYS: "${BACKFILL_CHUNK_ANGEL_1M_DAYS:-30}"
+      BACKFILL_CHUNK_ANGEL_5M_15M_DAYS: "${BACKFILL_CHUNK_ANGEL_5M_15M_DAYS:-90}"
+      BACKFILL_CHUNK_UPSTOX_1M_DAYS: "${BACKFILL_CHUNK_UPSTOX_1M_DAYS:-7}"
+      BACKFILL_CHUNK_UPSTOX_5M_15M_DAYS: "${BACKFILL_CHUNK_UPSTOX_5M_15M_DAYS:-30}"
+      BACKFILL_CHUNK_UPSTOX_1D_DAYS: "${BACKFILL_CHUNK_UPSTOX_1D_DAYS:-365}"
+
+      # ── Observability ────────────────────────────────────────────────────
+      OTEL_EXPORTER: "${OTEL_EXPORTER:-noop}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+
+      # ── Security ─────────────────────────────────────────────────────────
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+      SECRETS_BACKEND: "${SECRETS_BACKEND:-env}"
+
+      # ── Provider credentials (injected from .env — never hardcoded) ─────
+      ANGEL_ONE_API_KEY: "${ANGEL_ONE_API_KEY}"
+      ANGEL_ONE_CLIENT_ID: "${ANGEL_ONE_CLIENT_ID}"
+      ANGEL_ONE_TOTP_SECRET: "${ANGEL_ONE_TOTP_SECRET}"
+      UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
+      UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
+      UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/v1/health/live"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+    networks:
+      - data-service-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Worker service — backfill jobs, gap recovery, background tasks
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: data-service:2.0.0
+    container_name: data-service-worker
+    restart: unless-stopped
+    command: ["python", "-m", "src.worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-mds_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mds}"
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD: "${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}"
+      CIRCUIT_BREAKER_RECOVERY_WINDOW_SEC: "${CIRCUIT_BREAKER_RECOVERY_WINDOW_SEC:-60}"
+      CACHE_L1_MAX_ENTRIES: "${CACHE_L1_MAX_ENTRIES:-10000}"
+      PROVIDER_QUEUE_MAX_DEPTH: "${PROVIDER_QUEUE_MAX_DEPTH:-100}"
+      GAP_RECOVERY_MAX_ATTEMPTS: "${GAP_RECOVERY_MAX_ATTEMPTS:-5}"
+      BACKFILL_CHUNK_ANGEL_1M_DAYS: "${BACKFILL_CHUNK_ANGEL_1M_DAYS:-30}"
+      BACKFILL_CHUNK_ANGEL_5M_15M_DAYS: "${BACKFILL_CHUNK_ANGEL_5M_15M_DAYS:-90}"
+      BACKFILL_CHUNK_UPSTOX_1M_DAYS: "${BACKFILL_CHUNK_UPSTOX_1M_DAYS:-7}"
+      BACKFILL_CHUNK_UPSTOX_5M_15M_DAYS: "${BACKFILL_CHUNK_UPSTOX_5M_15M_DAYS:-30}"
+      BACKFILL_CHUNK_UPSTOX_1D_DAYS: "${BACKFILL_CHUNK_UPSTOX_1D_DAYS:-365}"
+      OTEL_EXPORTER: "${OTEL_EXPORTER:-noop}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      SECRETS_BACKEND: "${SECRETS_BACKEND:-env}"
+      ANGEL_ONE_API_KEY: "${ANGEL_ONE_API_KEY}"
+      ANGEL_ONE_CLIENT_ID: "${ANGEL_ONE_CLIENT_ID}"
+      ANGEL_ONE_TOTP_SECRET: "${ANGEL_ONE_TOTP_SECRET}"
+      UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
+      UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
+      UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+    networks:
+      - data-service-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Scheduler service — APScheduler cron jobs
+  #   08:45 IST  — F&O universe refresh
+  #   23:55 IST  — Angel One JWT rotation
+  # ---------------------------------------------------------------------------
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: data-service:2.0.0
+    container_name: data-service-scheduler
+    restart: unless-stopped
+    command: ["python", "-m", "src.scheduler"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: "${ENVIRONMENT:-production}"
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-mds_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mds}"
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD: "${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}"
+      CIRCUIT_BREAKER_RECOVERY_WINDOW_SEC: "${CIRCUIT_BREAKER_RECOVERY_WINDOW_SEC:-60}"
+      GAP_RECOVERY_MAX_ATTEMPTS: "${GAP_RECOVERY_MAX_ATTEMPTS:-5}"
+      OTEL_EXPORTER: "${OTEL_EXPORTER:-noop}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      SECRETS_BACKEND: "${SECRETS_BACKEND:-env}"
+      ANGEL_ONE_API_KEY: "${ANGEL_ONE_API_KEY}"
+      ANGEL_ONE_CLIENT_ID: "${ANGEL_ONE_CLIENT_ID}"
+      ANGEL_ONE_TOTP_SECRET: "${ANGEL_ONE_TOTP_SECRET}"
+      UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
+      UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
+      UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+    networks:
+      - data-service-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 — L2 cache, Event Bus (Redis Streams), distributed state
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: data-service-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+        --save 60 1
+        --loglevel warning
+        --maxmemory "${REDIS_MAX_MEMORY:-512mb}"
+        --maxmemory-policy allkeys-lru
+        --tcp-backlog 511
+        --bind 0.0.0.0
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+    networks:
+      - data-service-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 15 + TimescaleDB — persistent OHLCV, provenance, instruments
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: data-service-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-mds}"
+      POSTGRES_USER: "${POSTGRES_USER:-mds_user}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      # Tune shared_buffers for the container's available memory.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Mount init scripts so TimescaleDB extension is created on first start.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mds_user} -d ${POSTGRES_DB:-mds}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    networks:
+      - data-service-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+# ---------------------------------------------------------------------------
+# Named volumes — data persists across container restarts
+# ---------------------------------------------------------------------------
+volumes:
+  redis_data:
+    driver: local
+  pg_data:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# Network — isolated bridge network for all services
+# ---------------------------------------------------------------------------
+networks:
+  data-service-net:
+    driver: bridge
