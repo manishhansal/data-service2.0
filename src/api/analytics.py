@@ -123,6 +123,7 @@ _KNOWN_PROVIDERS: list[str] = [
     "yahoo_finance",
     "binance",
     "deribit",
+    "delta",   # DS2-RCA-001 fix — Delta Exchange India
 ]
 
 # Valid circuit-breaker state strings.

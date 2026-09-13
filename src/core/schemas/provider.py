@@ -32,6 +32,7 @@ class ProviderId(str, Enum):
     YAHOO_FINANCE = "yahoo_finance"
     BINANCE = "binance"
     DERIBIT = "deribit"
+    DELTA = "delta"  # Delta Exchange India — INR-settled perpetuals
 
 
 class DataType(str, Enum):

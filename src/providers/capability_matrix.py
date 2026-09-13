@@ -497,6 +497,61 @@ _MATRIX: list[ProviderCapability] = [
         sourceType=SourceType.CREDENTIAL_FREE,
         priority=1,
     ),
+
+    # =========================================================================
+    # Delta Exchange India
+    # Credential-free public REST + WebSocket.
+    # INR-settled perpetual futures for BTC/ETH/SOL (BTCUSD, ETHUSD, SOLUSD).
+    # AlphaForge default active broker (ACTIVE_BROKER=delta).
+    # Rate limit: 10 req/s (conservative; Delta has generous public limits).
+    # Priority: 2 (Binance is primary; Delta is fallback / primary for India).
+    # DS2-RCA-001 fix.
+    # =========================================================================
+
+    # Spot + futures OHLCV klines
+    ProviderCapability(
+        provider=ProviderId.DELTA,
+        dataType=DataType.CRYPTO_KLINES,
+        instrumentClass="CRYPTO_SPOT",
+        supported=True,
+        liveSupported=True,
+        historySupported=True,
+        maxChunkDays=365,
+        requestsPerSecond=10.0,
+        # 3m is explicitly permitted for Delta crypto (same crypto exception as Binance)
+        intervalSupport=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"],
+        sourceType=SourceType.CREDENTIAL_FREE,
+        priority=2,
+    ),
+    ProviderCapability(
+        provider=ProviderId.DELTA,
+        dataType=DataType.CRYPTO_KLINES,
+        instrumentClass="CRYPTO_FUTURES",
+        supported=True,
+        liveSupported=True,
+        historySupported=True,
+        maxChunkDays=365,
+        requestsPerSecond=10.0,
+        intervalSupport=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"],
+        sourceType=SourceType.CREDENTIAL_FREE,
+        priority=2,
+    ),
+
+    # Futures market data (mark price, funding, OI history)
+    # Note: Delta India has NO public long/short ratio endpoint.
+    ProviderCapability(
+        provider=ProviderId.DELTA,
+        dataType=DataType.CRYPTO_FUTURES,
+        instrumentClass="CRYPTO_FUTURES",
+        supported=True,
+        liveSupported=True,
+        historySupported=True,
+        maxChunkDays=30,
+        requestsPerSecond=10.0,
+        intervalSupport=["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"],
+        sourceType=SourceType.CREDENTIAL_FREE,
+        priority=2,
+    ),
 ]
 
 
