@@ -142,21 +142,57 @@ def _register_routers(app: FastAPI) -> None:
     # If a router module doesn't exist yet (future tasks), we skip it
     # gracefully so the server still boots during incremental development.
 
+    # ── Unauthenticated routes (health, metrics, auth token exchange) ────
     _try_include(app, "src.api.health", prefix="", tags=["Health"])
     _try_include(app, "src.api.metrics", prefix="", tags=["Metrics"])
-    _try_include(app, "src.api.instruments", prefix="/v1", tags=["Instruments"])
-    _try_include(app, "src.api.india", prefix="/v1", tags=["India Markets"])
-    _try_include(app, "src.api.crypto", prefix="/v1", tags=["Crypto Markets"])
-    _try_include(app, "src.api.deribit", prefix="/v1", tags=["Deribit"])
-    _try_include(app, "src.api.quality", prefix="/v1", tags=["Quality"])
-    _try_include(app, "src.api.providers", prefix="/v1", tags=["Providers"])
-    _try_include(app, "src.api.lineage", prefix="/v1", tags=["Lineage"])
-    _try_include(app, "src.api.provenance", prefix="/v1", tags=["Provenance"])
-    _try_include(app, "src.api.streaming", prefix="/v1", tags=["Streaming"])
-    _try_include(app, "src.api.internal", prefix="/v1", tags=["Internal"])
-    _try_include(app, "src.api.analytics", prefix="/v1", tags=["Analytics"])
     _try_include(app, "src.auth.consumer_auth", prefix="/v1", tags=["Auth"])
-    _try_include(app, "src.api.replay", prefix="/v1", tags=["Replay"])
+
+    # ── Authenticated routes — require API key or JWT bearer ─────────────
+    # DS2-RCA-016 fix: all data routes require consumer authentication.
+    # ConsumerAuthDependency is applied as a router-level dependency so every
+    # endpoint in these modules is protected without modifying each handler.
+    try:
+        from src.auth.consumer_auth import ConsumerAuthDependency  # noqa: PLC0415
+        _auth_dep = ConsumerAuthDependency()
+    except Exception:  # noqa: BLE001
+        _auth_dep = None  # Degraded: auth not available — log and continue
+
+    def _include_protected(module_path: str, *, prefix: str, tags: list[str]) -> None:
+        """Include a router with authentication dependency applied."""
+        try:
+            import importlib  # noqa: PLC0415
+            module = importlib.import_module(module_path)
+            router = getattr(module, "router", None)
+            if router is None:
+                return
+            if _auth_dep is not None:
+                from fastapi import Depends  # noqa: PLC0415
+                import fastapi  # noqa: PLC0415
+                # Apply auth as a router-level dependency via include_router
+                app.include_router(
+                    router,
+                    prefix=prefix,
+                    tags=tags,
+                    dependencies=[Depends(_auth_dep)],
+                )
+            else:
+                app.include_router(router, prefix=prefix, tags=tags)
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+    _include_protected("src.api.instruments", prefix="/v1", tags=["Instruments"])
+    _include_protected("src.api.india", prefix="/v1", tags=["India Markets"])
+    _include_protected("src.api.broker_analytics", prefix="/v1", tags=["Broker Analytics"])
+    _include_protected("src.api.crypto", prefix="/v1", tags=["Crypto Markets"])
+    _include_protected("src.api.deribit", prefix="/v1", tags=["Deribit"])
+    _include_protected("src.api.quality", prefix="/v1", tags=["Quality"])
+    _include_protected("src.api.providers", prefix="/v1", tags=["Providers"])
+    _include_protected("src.api.lineage", prefix="/v1", tags=["Lineage"])
+    _include_protected("src.api.provenance", prefix="/v1", tags=["Provenance"])
+    _include_protected("src.api.streaming", prefix="/v1", tags=["Streaming"])
+    _include_protected("src.api.internal", prefix="/v1", tags=["Internal"])
+    _include_protected("src.api.analytics", prefix="/v1", tags=["Analytics"])
+    _include_protected("src.api.replay", prefix="/v1", tags=["Replay"])
 
 
 def _try_include(app: FastAPI, module_path: str, *, prefix: str, tags: list[str]) -> None:
