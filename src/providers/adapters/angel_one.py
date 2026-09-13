@@ -104,6 +104,9 @@ _REQUESTS_PER_SECOND = 3.0
 _MIN_INTERVAL_S = 1.0 / _REQUESTS_PER_SECOND  # ~0.333s
 
 # Interval mapping — canonical → SmartAPI named interval
+# Note: Angel One SmartAPI does NOT support 1M (monthly) candles.
+# Monthly bars must be sourced from Upstox or Yahoo Finance.
+# Requesting 1M raises ProviderUnsupportedError — callers must fall back.
 _INTERVAL_MAP: dict[str, str] = {
     "1m": "ONE_MINUTE",
     "5m": "FIVE_MINUTE",
@@ -113,6 +116,8 @@ _INTERVAL_MAP: dict[str, str] = {
     "1h": "ONE_HOUR",
     "1d": "ONE_DAY",
     "1w": "ONE_WEEK",
+    # "1M": NOT SUPPORTED — Angel One SmartAPI has no monthly interval.
+    # Use Upstox (1month) or Yahoo Finance (1mo) for monthly candles.
 }
 
 # Intervals permanently banned for Indian market data
