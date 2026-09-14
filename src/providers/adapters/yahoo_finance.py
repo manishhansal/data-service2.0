@@ -125,7 +125,7 @@ def _validate_instrument_type(instrument_type: str) -> None:
     Raises:
         YahooFinanceInstrumentError: If ``instrument_type`` is not ``"EQ"``.
     """
-    if instrument_type.upper() != "EQ":
+    if instrument_type.upper() not in ("EQ", "IDX", "INDEX"):
         raise YahooFinanceInstrumentError(
             f"YahooFinanceAdapter is restricted to equity (EQ) instruments; "
             f"got {instrument_type!r}. Yahoo Finance must not be used for "
@@ -151,8 +151,15 @@ def _resolve_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
         Yahoo Finance ticker string, e.g. ``"RELIANCE.NS"``.
     """
     sym = symbol.upper().strip()
-    # If the symbol already has an exchange suffix, use it as-is.
-    if "." in sym:
+    # NSE index → Yahoo Finance ticker mapping (indices don't use .NS suffix)
+    _NSE_INDEX_MAP = {
+        "NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK",
+        "FINNIFTY": "^CNXFIN", "MIDCPNIFTY": "^NSEMDCP50", "SENSEX": "^BSESN",
+    }
+    if sym in _NSE_INDEX_MAP:
+        return _NSE_INDEX_MAP[sym]
+    # If the symbol already has an exchange suffix or ^ prefix, use it as-is.
+    if "." in sym or sym.startswith("^"):
         return sym
     exchange_upper = exchange.upper()
     if exchange_upper in ("NSE", "NFO"):
