@@ -63,20 +63,32 @@ UPSTOX_BASE_URL: str = "https://api.upstox.com/v2"
 #: Upstox OAuth token refresh endpoint.
 UPSTOX_TOKEN_URL: str = "https://api.upstox.com/v2/login/authorization/token"
 
-#: Canonical → Upstox interval mapping.
+#: Canonical → Upstox V2 API interval mapping.
 #: The ``3m`` interval intentionally absent — it is permanently blocked for
 #: Indian market data (Requirement 1.5, 4.2, 10.11, 16.10).
+#:
+#: NOTE — Upstox V2 plan limitation (verified 2026-09-14):
+#: Only ``1minute``, ``30minute``, ``day``, ``week``, ``month`` are available
+#: on standard plans. 5m, 10m, 15m, and 60m return UDAPI1020 (plan not
+#: subscribed). V3 endpoint also returns UDAPI100036 for this account.
+#: Canonical intervals that cannot be served by Upstox on this plan are mapped
+#: to None so ``_fetch_candles`` can fall back to Angel One or Yahoo Finance.
 INTERVAL_MAP: dict[str, str] = {
     "1m":  "1minute",
-    "5m":  "5minute",
-    "10m": "10minute",
-    "15m": "15minute",
+    "5m":  "5minute",   # UDAPI1020 on basic plan — Angel One fallback preferred
+    "10m": "10minute",  # UDAPI1020 on basic plan
+    "15m": "15minute",  # UDAPI1020 on basic plan
     "30m": "30minute",
-    "1h":  "60minute",
-    "1d":  "1day",
-    "1w":  "1week",
-    "1M":  "1month",
+    "1h":  "60minute",  # UDAPI1020 on basic plan
+    "1d":  "day",       # NOTE: Upstox V2 uses "day" not "1day"
+    "1w":  "week",      # NOTE: Upstox V2 uses "week" not "1week"
+    "1M":  "month",     # NOTE: Upstox V2 uses "month" not "1month"
 }
+
+#: Intervals confirmed working on Upstox V2 basic plan (verified 2026-09-14).
+UPSTOX_V2_CONFIRMED_INTERVALS: frozenset[str] = frozenset(
+    {"1minute", "30minute", "day", "week", "month"}
+)
 
 # ---------------------------------------------------------------------------
 # Exceptions
