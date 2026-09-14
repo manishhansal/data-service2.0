@@ -113,6 +113,29 @@ def _http_401(code: str, message: str) -> HTTPException:
 # ---------------------------------------------------------------------------
 
 
+def _validate_api_key(api_key: Optional[str]) -> str:
+    """Validate *api_key* against the configured allowlist and return it.
+
+    This is a plain function (no FastAPI dependency annotations) so it can be
+    called directly from WebSocket handlers — where ``APIKeyHeader.__call__``
+    cannot be used because it requires an HTTP ``Request`` object.
+
+    Raises:
+        HTTPException(401): when the key is absent or not in the allowlist.
+    """
+    settings = get_settings()
+    valid_keys = settings.consumer_api_keys_list
+
+    if not api_key:
+        raise _http_401("UNAUTHORIZED", "Missing X-API-KEY header.")
+
+    if api_key not in valid_keys:
+        _log.warning("api_key_rejected", key_prefix=api_key[:6] + "…" if len(api_key) > 6 else "…")
+        raise _http_401("INVALID_API_KEY", "The provided API key is not valid.")
+
+    return api_key
+
+
 class ApiKeyAuth:
     """Validate the ``X-API-KEY`` header against the configured allowlist.
 
@@ -132,17 +155,7 @@ class ApiKeyAuth:
         api_key: Annotated[Optional[str], Security(_api_key_header_scheme)] = None,
     ) -> str:
         """Return the consumer ID (the API key itself) or raise HTTP 401."""
-        settings = get_settings()
-        valid_keys = settings.consumer_api_keys_list
-
-        if not api_key:
-            raise _http_401("UNAUTHORIZED", "Missing X-API-KEY header.")
-
-        if api_key not in valid_keys:
-            _log.warning("api_key_rejected", key_prefix=api_key[:6] + "…" if len(api_key) > 6 else "…")
-            raise _http_401("INVALID_API_KEY", "The provided API key is not valid.")
-
-        return api_key
+        return _validate_api_key(api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +256,7 @@ class ConsumerAuthDependency:
         """Authenticate the incoming request and return the consumer identity."""
         # Prefer the API key path — it is cheaper and has no crypto overhead.
         if api_key is not None:
-            return ApiKeyAuth()(api_key=api_key)
+            return _validate_api_key(api_key)
 
         if credentials is not None:
             return JwtBearerAuth()(credentials=credentials)
