@@ -270,8 +270,8 @@ class TestFetchFoEodIntervalValidation:
 
     async def test_1d_does_not_raise(self) -> None:
         adapter = JugaadDataAdapter()
-        # Patch _fetch_bhavcopy_range to return empty list (no HTTP needed).
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=[])):
+        # Dates before 2024-07-08 (old ZIP format era) to avoid the UDiff warning path
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=[]):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 1),
@@ -307,8 +307,10 @@ class TestFetchFoEodReturnShape:
 
     async def test_returns_list(self) -> None:
         adapter = JugaadDataAdapter()
-        raw = [_make_raw_row("NIFTY", datetime.date(2024, 1, 15))]
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=raw)):
+        raw_fo = [JugaadDataAdapter._normalise_fo_row(
+            _make_raw_row("NIFTY", datetime.date(2024, 1, 15)), "NIFTY"
+        )]
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=raw_fo):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 15),
@@ -319,8 +321,10 @@ class TestFetchFoEodReturnShape:
 
     async def test_rows_have_canonical_fields(self) -> None:
         adapter = JugaadDataAdapter()
-        raw = [_make_raw_row("NIFTY", datetime.date(2024, 1, 15))]
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=raw)):
+        raw_fo = [JugaadDataAdapter._normalise_fo_row(
+            _make_raw_row("NIFTY", datetime.date(2024, 1, 15)), "NIFTY"
+        )]
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=raw_fo):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 15),
@@ -333,8 +337,10 @@ class TestFetchFoEodReturnShape:
 
     async def test_source_type_credential_free(self) -> None:
         adapter = JugaadDataAdapter()
-        raw = [_make_raw_row("NIFTY", datetime.date(2024, 1, 15))]
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=raw)):
+        raw_fo = [JugaadDataAdapter._normalise_fo_row(
+            _make_raw_row("NIFTY", datetime.date(2024, 1, 15)), "NIFTY"
+        )]
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=raw_fo):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 15),
@@ -344,8 +350,10 @@ class TestFetchFoEodReturnShape:
 
     async def test_provider_field_is_jugaad_data(self) -> None:
         adapter = JugaadDataAdapter()
-        raw = [_make_raw_row("NIFTY", datetime.date(2024, 1, 15))]
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=raw)):
+        raw_fo = [JugaadDataAdapter._normalise_fo_row(
+            _make_raw_row("NIFTY", datetime.date(2024, 1, 15)), "NIFTY"
+        )]
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=raw_fo):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 15),
@@ -355,7 +363,7 @@ class TestFetchFoEodReturnShape:
 
     async def test_empty_range_returns_empty_list(self) -> None:
         adapter = JugaadDataAdapter()
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=[])):
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=[]):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 1),
@@ -370,22 +378,25 @@ class TestFetchFoEodOiSemantics:
     async def test_oi_from_open_int_not_trdval(self) -> None:
         """When OPEN_INT is present, use it; never use TRDVAL for OI."""
         adapter = JugaadDataAdapter()
-        raw = [_make_raw_row("NIFTY", datetime.date(2024, 1, 15), oi=300000)]
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=raw)):
+        raw_fo = [JugaadDataAdapter._normalise_fo_row(
+            _make_raw_row("NIFTY", datetime.date(2024, 1, 15), oi=300000), "NIFTY"
+        )]
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=raw_fo):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 15),
                 to_date=datetime.date(2024, 1, 15),
             )
         assert result[0]["oi"] == 300000
-        # Must not equal the tradedValue we set in _make_raw_row.
         assert result[0]["oi"] != 1_100_000_000
 
     async def test_oi_is_none_when_not_provided(self) -> None:
-        """Absent OI must yield None + oi_missing=True — not 0, not tradedValue."""
+        """Absent OI must yield None + oi_missing=True."""
         adapter = JugaadDataAdapter()
-        raw = [_make_raw_row("NIFTY", datetime.date(2024, 1, 15), oi=None)]
-        with patch.object(adapter, "_fetch_bhavcopy_range", new=AsyncMock(return_value=raw)):
+        raw_fo = [JugaadDataAdapter._normalise_fo_row(
+            _make_raw_row("NIFTY", datetime.date(2024, 1, 15), oi=None), "NIFTY"
+        )]
+        with patch.object(adapter, "_sync_fo_bhavcopy", return_value=raw_fo):
             result = await adapter.fetch_fo_eod(
                 symbol="NIFTY",
                 from_date=datetime.date(2024, 1, 15),
@@ -396,36 +407,34 @@ class TestFetchFoEodOiSemantics:
 
 
 class TestBhavcopySingleDay:
-    """Unit tests for _fetch_bhavcopy_day internal helper via HTTP mock."""
+    """Tests for _sync_fo_bhavcopy graceful error handling."""
 
     async def test_404_returns_empty_list(self) -> None:
-        """404 response (holiday/non-trading day) must return empty list."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        adapter = JugaadDataAdapter(http_client=mock_client)
-        result = await adapter._fetch_bhavcopy_day("NIFTY", datetime.date(2024, 1, 15))
+        """404 response (holiday/non-trading day) returns empty list."""
+        adapter = JugaadDataAdapter()
+        # Patch httpx.get to simulate 404
+        with patch("httpx.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+            mock_get.return_value = mock_resp
+            result = adapter._sync_fo_bhavcopy("NIFTY",
+                datetime.date(2024, 1, 15), datetime.date(2024, 1, 15))
         assert result == []
 
     async def test_non_200_non_404_returns_empty_list(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        adapter = JugaadDataAdapter(http_client=mock_client)
-        result = await adapter._fetch_bhavcopy_day("NIFTY", datetime.date(2024, 1, 15))
+        adapter = JugaadDataAdapter()
+        with patch("httpx.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 500
+            mock_get.return_value = mock_resp
+            result = adapter._sync_fo_bhavcopy("NIFTY",
+                datetime.date(2024, 1, 15), datetime.date(2024, 1, 15))
         assert result == []
 
     async def test_network_error_returns_empty_list(self) -> None:
-        """Network errors must be handled gracefully (no raise)."""
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
-
-        adapter = JugaadDataAdapter(http_client=mock_client)
-        result = await adapter._fetch_bhavcopy_day("NIFTY", datetime.date(2024, 1, 15))
+        """Network errors must be handled gracefully."""
+        adapter = JugaadDataAdapter()
+        with patch("httpx.get", side_effect=Exception("connection refused")):
+            result = adapter._sync_fo_bhavcopy("NIFTY",
+                datetime.date(2024, 1, 15), datetime.date(2024, 1, 15))
         assert result == []

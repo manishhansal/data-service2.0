@@ -37,10 +37,12 @@ from src.engines.quality_engine import (
 
 _engine = QualityEngine()
 
-# A future expiry date always ≥ today
-_FUTURE_EXPIRY = (date.today() + timedelta(days=30)).isoformat()
-_YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
-_TODAY = date.today().isoformat()
+# A future expiry date always ≥ today — use UTC date to match validator behaviour
+from datetime import timezone as _tz
+_UTC_TODAY = __import__("datetime").datetime.now(tz=_tz.utc).date()
+_FUTURE_EXPIRY = (_UTC_TODAY + timedelta(days=30)).isoformat()
+_YESTERDAY = (_UTC_TODAY - timedelta(days=1)).isoformat()
+_TODAY = _UTC_TODAY.isoformat()
 _VALID_TS = 1_700_000_000_000  # a fixed past-but-not-too-old epoch-ms value
 
 
