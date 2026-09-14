@@ -156,10 +156,13 @@ class CredentialStripperMiddleware(BaseHTTPMiddleware):
         sanitised_bytes = self._sanitise_body(body_bytes)
 
         # Rebuild the response with the sanitised body.
+        # Must recompute Content-Length since sanitisation may change body size.
+        new_headers = dict(response.headers)
+        new_headers["content-length"] = str(len(sanitised_bytes))
         return Response(
             content=sanitised_bytes,
             status_code=response.status_code,
-            headers=dict(response.headers),
+            headers=new_headers,
             media_type=response.media_type,
         )
 

@@ -64,6 +64,78 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await logger.awarning("postgres_unavailable", error=str(exc), degraded=True)
         app.state.db_engine = None
 
+    # ── Angel One adapter (live quotes, option chain, broker analytics) ──────
+    # Credentials from env vars — never logged.
+    app.state.angel_one_adapter = None
+    if (
+        settings.angel_one_api_key
+        and settings.angel_one_client_id
+        and settings.angel_one_totp_secret
+    ):
+        try:
+            from src.providers.adapters.angel_one import AngelOneAdapter  # noqa: PLC0415
+            adapter = AngelOneAdapter(
+                api_key=settings.angel_one_api_key,
+                client_id=settings.angel_one_client_id,
+                totp_secret=settings.angel_one_totp_secret,
+                mpin=settings.angel_one_mpin,
+            )
+            await adapter.ensure_authenticated()
+            app.state.angel_one_adapter = adapter
+            await logger.ainfo("angel_one_adapter_authenticated", provider="angel_one")
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning(
+                "angel_one_adapter_auth_failed",
+                error=str(exc),
+                note="live quotes and option chain will return null values",
+            )
+    else:
+        await logger.awarning(
+            "angel_one_credentials_not_configured",
+            note="Set ANGEL_ONE_API_KEY, ANGEL_ONE_CLIENT_ID, ANGEL_ONE_TOTP_SECRET",
+            degraded=True,
+        )
+
+    # ── Upstox adapter (historical OHLCV, live quotes, index intraday) ──────────
+    # Uses the pre-obtained OAuth access token from UPSTOX_ACCESS_TOKEN env var.
+    # When present the adapter is ready immediately — no OAuth round-trip needed.
+    app.state.upstox_adapter = None
+    if settings.upstox_access_token and settings.upstox_api_key:
+        try:
+            from src.providers.adapters.upstox import UpstoxAdapter  # noqa: PLC0415
+            upstox_adapter = UpstoxAdapter(
+                api_key=settings.upstox_api_key,
+                api_secret=settings.upstox_api_secret or "",
+                redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
+            )
+            await upstox_adapter.set_access_token(settings.upstox_access_token)
+            app.state.upstox_adapter = upstox_adapter
+            await logger.ainfo("upstox_adapter_ready", provider="upstox")
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning(
+                "upstox_adapter_init_failed",
+                error=str(exc),
+                note="Upstox data will be unavailable",
+            )
+    else:
+        await logger.awarning(
+            "upstox_credentials_not_configured",
+            note="Set UPSTOX_ACCESS_TOKEN and UPSTOX_API_KEY for Upstox data",
+            degraded=True,
+        )
+
+    # ── Market engine (uses real Angel One adapter when available) ────────────
+    try:
+        from src.engines.market_engine import MarketEngine  # noqa: PLC0415
+        market_engine = MarketEngine(angel_one_adapter=app.state.angel_one_adapter)
+        app.state.market_engine = market_engine
+        await logger.ainfo(
+            "market_engine_ready",
+            real_provider=app.state.angel_one_adapter is not None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await logger.awarning("market_engine_init_failed", error=str(exc))
+
     await logger.ainfo("data_service_ready", version="2.0.0")
 
     yield  # ── Application running ────────────────────────────────────────
@@ -142,21 +214,69 @@ def _register_routers(app: FastAPI) -> None:
     # If a router module doesn't exist yet (future tasks), we skip it
     # gracefully so the server still boots during incremental development.
 
+    # ── Unauthenticated routes (health, metrics, auth token exchange) ────
     _try_include(app, "src.api.health", prefix="", tags=["Health"])
     _try_include(app, "src.api.metrics", prefix="", tags=["Metrics"])
-    _try_include(app, "src.api.instruments", prefix="/v1", tags=["Instruments"])
-    _try_include(app, "src.api.india", prefix="/v1", tags=["India Markets"])
-    _try_include(app, "src.api.crypto", prefix="/v1", tags=["Crypto Markets"])
-    _try_include(app, "src.api.deribit", prefix="/v1", tags=["Deribit"])
-    _try_include(app, "src.api.quality", prefix="/v1", tags=["Quality"])
-    _try_include(app, "src.api.providers", prefix="/v1", tags=["Providers"])
-    _try_include(app, "src.api.lineage", prefix="/v1", tags=["Lineage"])
-    _try_include(app, "src.api.provenance", prefix="/v1", tags=["Provenance"])
-    _try_include(app, "src.api.streaming", prefix="/v1", tags=["Streaming"])
-    _try_include(app, "src.api.internal", prefix="/v1", tags=["Internal"])
-    _try_include(app, "src.api.analytics", prefix="/v1", tags=["Analytics"])
     _try_include(app, "src.auth.consumer_auth", prefix="/v1", tags=["Auth"])
-    _try_include(app, "src.api.replay", prefix="/v1", tags=["Replay"])
+    # ── AlphaForge ScraplingProvider compatibility routes (unauthenticated) ──
+    # These /scraping/* endpoints translate AlphaForge's ScraplingProvider
+    # calls into data-service2.0 backend logic.  They do NOT require API key
+    # authentication because they are called from AlphaForge's server-side
+    # only (not exposed to the browser) and are on the same internal network.
+    # If external exposure is required, add auth via CONSUMER_API_KEYS.
+    # Also exposes /data/gate for backward compatibility with the gate-client.ts
+    _try_include(app, "src.api.compat", prefix="", tags=["Compat"])
+
+    # ── Authenticated routes — require API key or JWT bearer ─────────────
+    # DS2-RCA-016 fix: all data routes require consumer authentication.
+    # ConsumerAuthDependency is applied as a router-level dependency so every
+    # endpoint in these modules is protected without modifying each handler.
+    try:
+        from src.auth.consumer_auth import ConsumerAuthDependency  # noqa: PLC0415
+        _auth_dep = ConsumerAuthDependency()
+    except Exception:  # noqa: BLE001
+        _auth_dep = None  # Degraded: auth not available — log and continue
+
+    def _include_protected(module_path: str, *, prefix: str, tags: list[str]) -> None:
+        """Include a router with authentication dependency applied."""
+        try:
+            import importlib  # noqa: PLC0415
+            module = importlib.import_module(module_path)
+            router = getattr(module, "router", None)
+            if router is None:
+                return
+            if _auth_dep is not None:
+                from fastapi import Depends  # noqa: PLC0415
+                import fastapi  # noqa: PLC0415
+                # Apply auth as a router-level dependency via include_router
+                app.include_router(
+                    router,
+                    prefix=prefix,
+                    tags=tags,
+                    dependencies=[Depends(_auth_dep)],
+                )
+            else:
+                app.include_router(router, prefix=prefix, tags=tags)
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+    _include_protected("src.api.instruments", prefix="/v1", tags=["Instruments"])
+    _include_protected("src.api.india", prefix="/v1", tags=["India Markets"])
+    _include_protected("src.api.broker_analytics", prefix="/v1", tags=["Broker Analytics"])
+    _include_protected("src.api.crypto", prefix="/v1", tags=["Crypto Markets"])
+    _include_protected("src.api.deribit", prefix="/v1", tags=["Deribit"])
+    _include_protected("src.api.quality", prefix="/v1", tags=["Quality"])
+    _include_protected("src.api.providers", prefix="/v1", tags=["Providers"])
+    _include_protected("src.api.lineage", prefix="/v1", tags=["Lineage"])
+    _include_protected("src.api.provenance", prefix="/v1", tags=["Provenance"])
+    # src.api.streaming is intentionally NOT wrapped with _include_protected.
+    # FastAPI's APIKeyHeader dependency expects an HTTP Request object, but
+    # WebSocket connections inject a WebSocket — causing a TypeError at
+    # connection time.  The streaming module handles auth inline instead.
+    _try_include(app, "src.api.streaming", prefix="/v1", tags=["Streaming"])
+    _include_protected("src.api.internal", prefix="/v1", tags=["Internal"])
+    _include_protected("src.api.analytics", prefix="/v1", tags=["Analytics"])
+    _include_protected("src.api.replay", prefix="/v1", tags=["Replay"])
 
 
 def _try_include(app: FastAPI, module_path: str, *, prefix: str, tags: list[str]) -> None:

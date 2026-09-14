@@ -55,6 +55,7 @@ PROVIDER_RATE_LIMITS: dict[str, float] = {
     ProviderId.YAHOO_FINANCE.value: 1.0,
     ProviderId.BINANCE.value:       20.0,
     ProviderId.DERIBIT.value:       5.0,
+    ProviderId.DELTA.value:         10.0,  # DS2-RCA-001: Delta Exchange India REST
 }
 
 

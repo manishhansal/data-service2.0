@@ -479,6 +479,30 @@ async def ws_stream_ticks(websocket: WebSocket) -> None:
 
     Requirements: 15.5, 15.6, 15.7, 15.8
     """
+    # ---- Inline authentication ------------------------------------------------
+    # FastAPI's APIKeyHeader security scheme requires an HTTP Request object and
+    # raises TypeError when injected into a WebSocket handler.  We therefore
+    # authenticate manually here before accepting the connection.
+    #
+    # Clients may supply the API key in either of two ways:
+    #   1. Header:      X-API-KEY: <key>          (preferred — works from most WS
+    #                                               clients that support custom headers)
+    #   2. Query param: ?api_key=<key>             (fallback for browser clients or
+    #                                               environments that can't set headers)
+    try:
+        from src.auth.consumer_auth import ApiKeyAuth  # noqa: PLC0415
+
+        _raw_key = (
+            websocket.headers.get("x-api-key")
+            or websocket.query_params.get("api_key")
+        )
+        ApiKeyAuth()(_raw_key)  # raises HTTPException(401) on failure
+    except Exception:  # noqa: BLE001
+        # Reject before upgrading — close code 1008 = Policy Violation.
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+    # --------------------------------------------------------------------------
+
     conn_id = await manager.connect(websocket)
 
     await _log.ainfo(

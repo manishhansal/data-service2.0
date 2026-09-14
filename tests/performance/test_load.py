@@ -57,6 +57,10 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
 os.environ.setdefault("ENVIRONMENT", "development")
+# Set a test API key so that the ConsumerAuthDependency allows test requests.
+# DS2-RCA-016 fix: auth is now enforced — performance tests must supply a key.
+os.environ.setdefault("CONSUMER_API_KEYS", "perf-test-key-1")
+os.environ.setdefault("JWT_SECRET", "perf-test-jwt-secret-must-be-32chars!")
 
 from src.server import create_app  # noqa: E402  (must come after env setup)
 
@@ -258,6 +262,7 @@ async def async_client(app_with_mocks):
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://testserver",
+        headers={"X-API-Key": "perf-test-key-1"},  # DS2-RCA-016: auth now required
     ) as client:
         yield client
 

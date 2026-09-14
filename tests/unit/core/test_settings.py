@@ -48,7 +48,9 @@ class TestDefaults:
         s = make_settings()
         assert s.data_service_port == 8200
 
-    def test_redis_url_default(self):
+    def test_redis_url_default(self, monkeypatch):
+        # Isolate from any REDIS_URL set by .env.local in the developer environment.
+        monkeypatch.delenv("REDIS_URL", raising=False)
         s = make_settings()
         assert s.redis_url == "redis://redis:6379/0"
 
@@ -107,7 +109,9 @@ class TestDefaults:
         s = make_settings()
         assert s.secrets_backend == SecretsBackend.ENV
 
-    def test_cors_default_empty(self):
+    def test_cors_default_empty(self, monkeypatch):
+        # Isolate from CORS_ALLOWED_ORIGINS set by .env.local in the developer environment.
+        monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
         s = make_settings()
         assert s.cors_allowed_origins == ""
 
@@ -325,7 +329,9 @@ class TestCorsValidation:
         s = make_settings(cors_allowed_origins="")
         assert s.cors_allowed_origins == ""
 
-    def test_cors_origins_list_helper_empty(self):
+    def test_cors_origins_list_helper_empty(self, monkeypatch):
+        # Isolate from CORS_ALLOWED_ORIGINS set by .env.local in the developer environment.
+        monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
         s = make_settings()
         assert s.cors_origins_list == []
 

@@ -28,7 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy only the dependency manifest first to leverage Docker layer caching.
 # Re-run pip only when pyproject.toml changes.
-COPY pyproject.toml ./
+# README.md is required by hatchling to build the wheel metadata.
+COPY pyproject.toml README.md ./
 
 # Generate a requirements.txt from pyproject.toml for reproducible installs,
 # then install everything into /install so the runtime stage has a clean copy.
@@ -105,4 +106,4 @@ CMD ["uvicorn", "src.server:app", \
      "--port", "8200", \
      "--workers", "4", \
      "--loop", "uvloop", \
-     "--log-config", "/dev/null"]
+     "--no-access-log"]

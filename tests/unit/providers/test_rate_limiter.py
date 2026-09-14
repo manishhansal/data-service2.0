@@ -135,7 +135,12 @@ class TestProviderRateLimits:
     def test_deribit_5_rps(self) -> None:
         assert PROVIDER_RATE_LIMITS[ProviderId.DERIBIT.value] == 5.0
 
-    def test_all_eight_providers_present(self) -> None:
+    def test_delta_10_rps(self) -> None:
+        """DS2-RCA-001: Delta Exchange India added with 10 req/s limit."""
+        assert PROVIDER_RATE_LIMITS[ProviderId.DELTA.value] == 10.0
+
+    def test_all_nine_providers_present(self) -> None:
+        """All ProviderId enum members must have a rate limit entry (was 8, now 9 with Delta)."""
         expected = {p.value for p in ProviderId}
         assert expected == set(PROVIDER_RATE_LIMITS.keys()), (
             "PROVIDER_RATE_LIMITS must contain exactly one entry per ProviderId"

@@ -926,6 +926,16 @@ class TestIntervalMap:
         """3m must never be in _INTERVAL_MAP (permanently banned for Indian markets)."""
         assert "3m" not in _INTERVAL_MAP
 
+    def test_1M_not_in_interval_map(self) -> None:
+        """1M (monthly) is NOT supported by Angel One SmartAPI.
+        DS2-RCA-012: Angel One lacks a monthly interval. Callers must fall back
+        to Upstox (1month) or Yahoo Finance for monthly candles.
+        """
+        assert "1M" not in _INTERVAL_MAP, (
+            "1M must NOT be in _INTERVAL_MAP — Angel One SmartAPI has no monthly interval. "
+            "ProviderUnsupportedError should be raised; callers must use Upstox or Yahoo."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Close / lifecycle

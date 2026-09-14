@@ -202,9 +202,19 @@ class Settings(BaseSettings):
     angel_one_api_key: Optional[str] = None
     angel_one_client_id: Optional[str] = None
     angel_one_totp_secret: Optional[str] = None
+    angel_one_mpin: Optional[str] = None  # 4-digit broker login PIN
     upstox_api_key: Optional[str] = None
     upstox_api_secret: Optional[str] = None
     upstox_redirect_uri: Optional[str] = None
+    # Pre-obtained OAuth2 access token — set this after completing the OAuth
+    # flow externally (e.g. via the Upstox developer console or the
+    # /v1/auth/upstox/callback flow).  When present, the adapter skips the
+    # authorization-code exchange and uses this token directly.
+    upstox_access_token: Optional[str] = None
+    # Long-lived analytics JWT issued by Upstox for market-data analytics
+    # endpoints (PCR, OI buildup, gainers/losers).  Different from the OAuth
+    # access token — does not expire on a per-session basis.
+    upstox_analytics_key: Optional[str] = None
 
     # ── Crypto provider base URLs ─────────────────────────────────────────
     # Override these to point at testnet/sandbox environments or a proxy.

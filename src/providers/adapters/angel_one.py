@@ -104,6 +104,9 @@ _REQUESTS_PER_SECOND = 3.0
 _MIN_INTERVAL_S = 1.0 / _REQUESTS_PER_SECOND  # ~0.333s
 
 # Interval mapping — canonical → SmartAPI named interval
+# Note: Angel One SmartAPI does NOT support 1M (monthly) candles.
+# Monthly bars must be sourced from Upstox or Yahoo Finance.
+# Requesting 1M raises ProviderUnsupportedError — callers must fall back.
 _INTERVAL_MAP: dict[str, str] = {
     "1m": "ONE_MINUTE",
     "5m": "FIVE_MINUTE",
@@ -113,6 +116,8 @@ _INTERVAL_MAP: dict[str, str] = {
     "1h": "ONE_HOUR",
     "1d": "ONE_DAY",
     "1w": "ONE_WEEK",
+    # "1M": NOT SUPPORTED — Angel One SmartAPI has no monthly interval.
+    # Use Upstox (1month) or Yahoo Finance (1mo) for monthly candles.
 }
 
 # Intervals permanently banned for Indian market data
@@ -153,12 +158,19 @@ class AngelOneAdapter:
         client_id: str,
         totp_secret: str,
         *,
+        mpin: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         # Credentials are stored in private attributes and never echoed
         self._api_key = api_key
         self._client_id = client_id
         self._totp_secret = totp_secret
+        # Angel One SmartAPI login requires:
+        #   password = 4-digit MPIN (broker login PIN)
+        #   totp     = 6-digit TOTP code (from TOTP_SECRET)
+        # If mpin is not provided, fall back to using TOTP as password for
+        # backward compat (some test environments do not need MPIN).
+        self._mpin: Optional[str] = mpin
 
         self._http_client = http_client
         self._owns_client = http_client is None  # True → we created it, we close it
@@ -228,7 +240,9 @@ class AngelOneAdapter:
 
         payload = {
             "clientcode": self._client_id,
-            "password": totp_code,  # Angel One uses TOTP as the OTP field
+            # SmartAPI: password = 4-digit MPIN, totp = 6-digit TOTP code.
+            # Fall back to TOTP as password when MPIN not provided (legacy/test).
+            "password": self._mpin if self._mpin else totp_code,
             "totp": totp_code,
         }
         headers = {

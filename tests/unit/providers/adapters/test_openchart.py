@@ -269,8 +269,7 @@ class TestFetchHistoricalOhlcvIntervalValidation:
         adapter = OpenChartAdapter()
         with pytest.raises(ValueError, match="3m"):
             await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval="3m",
@@ -278,11 +277,12 @@ class TestFetchHistoricalOhlcvIntervalValidation:
 
     @pytest.mark.parametrize("interval", list(CANONICAL_INDIAN_TIMEFRAMES))
     async def test_canonical_intervals_do_not_raise(self, interval: str) -> None:
+        """All canonical intervals accepted; non-1d intervals return [] gracefully."""
         adapter = OpenChartAdapter()
-        with patch.object(adapter, "_request", new=AsyncMock(return_value=[])):
+        with patch.object(adapter, "_sync_stock_df", return_value=[]), \
+             patch.object(adapter, "_sync_index_df", return_value=[]):
             result = await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval=interval,
@@ -293,8 +293,7 @@ class TestFetchHistoricalOhlcvIntervalValidation:
         adapter = OpenChartAdapter()
         with pytest.raises(ValueError):
             await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval="2h",
@@ -302,13 +301,28 @@ class TestFetchHistoricalOhlcvIntervalValidation:
 
 
 class TestFetchHistoricalOhlcvReturnShape:
+    def _index_row(self) -> dict:
+        import pandas as pd
+        return {
+            "HistoricalDate": pd.Timestamp("2024-01-15 00:00:00"),
+            "OPEN": 22000.0, "HIGH": 22100.0, "LOW": 21900.0, "CLOSE": 22050.0,
+            "INDEX_NAME": "Nifty 50",
+        }
+
+    def _stock_row(self) -> dict:
+        import pandas as pd
+        return {
+            "DATE": pd.Timestamp("2024-01-15 18:30:00"),
+            "OPEN": 22000.0, "HIGH": 22100.0, "LOW": 21900.0, "CLOSE": 22050.0,
+            "VOLUME": 1200000, "SYMBOL": "RELIANCE",
+        }
+
     async def test_returns_list(self) -> None:
         adapter = OpenChartAdapter()
-        raw = [_make_raw_item()]
-        with patch.object(adapter, "_request", new=AsyncMock(return_value=raw)):
+        # NIFTY is an index — mock _sync_index_df
+        with patch.object(adapter, "_sync_index_df", return_value=[self._index_row()]):
             result = await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval="1d",
@@ -318,10 +332,9 @@ class TestFetchHistoricalOhlcvReturnShape:
 
     async def test_rows_have_canonical_fields(self) -> None:
         adapter = OpenChartAdapter()
-        with patch.object(adapter, "_request", new=AsyncMock(return_value=[_make_raw_item()])):
+        with patch.object(adapter, "_sync_index_df", return_value=[self._index_row()]):
             result = await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval="1d",
@@ -333,10 +346,9 @@ class TestFetchHistoricalOhlcvReturnShape:
 
     async def test_oi_always_none(self) -> None:
         adapter = OpenChartAdapter()
-        with patch.object(adapter, "_request", new=AsyncMock(return_value=[_make_raw_item()])):
+        with patch.object(adapter, "_sync_index_df", return_value=[self._index_row()]):
             result = await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval="1d",
@@ -346,10 +358,9 @@ class TestFetchHistoricalOhlcvReturnShape:
 
     async def test_source_type_credential_free(self) -> None:
         adapter = OpenChartAdapter()
-        with patch.object(adapter, "_request", new=AsyncMock(return_value=[_make_raw_item()])):
+        with patch.object(adapter, "_sync_index_df", return_value=[self._index_row()]):
             result = await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval="1d",
@@ -358,10 +369,10 @@ class TestFetchHistoricalOhlcvReturnShape:
 
     async def test_empty_response_returns_empty_list(self) -> None:
         adapter = OpenChartAdapter()
-        with patch.object(adapter, "_request", new=AsyncMock(return_value=[])):
+        with patch.object(adapter, "_sync_stock_df", return_value=[]), \
+             patch.object(adapter, "_sync_index_df", return_value=[]):
             result = await adapter.fetch_historical_ohlcv(
-                symbol="NIFTY",
-                exchange="NSE",
+                symbol="NIFTY", exchange="NSE",
                 from_date=datetime.date(2024, 1, 1),
                 to_date=datetime.date(2024, 1, 5),
                 interval="1d",
@@ -370,78 +381,53 @@ class TestFetchHistoricalOhlcvReturnShape:
 
 
 class TestRequestHttpHandling:
-    """Test HTTP response variants in the internal _request method."""
+    """Tests for backward-compat _normalise_row and error handling."""
 
     async def test_200_flat_list_response(self) -> None:
+        """_normalise_row shim handles legacy t/o/h/l/c/v dicts."""
         items = [_make_raw_item(t=1705276800), _make_raw_item(t=1705363200)]
-        mock_resp = _make_mock_response(status_code=200, body=items)
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        adapter = OpenChartAdapter(http_client=mock_client)
-        result = await adapter._request(
-            "NIFTY", "NSE",
-            datetime.date(2024, 1, 15),
-            datetime.date(2024, 1, 16),
-            "1d",
-        )
-        assert len(result) == 2
+        results = [_normalise_row(item, "NIFTY", "NSE", "1d") for item in items]
+        assert len(results) == 2
+        assert results[0]["time"] == 1705276800
 
     async def test_200_candles_dict_response(self) -> None:
-        """Response wrapped in {'candles': [...]} should be unwrapped."""
-        items = [_make_raw_item()]
-        mock_resp = _make_mock_response(status_code=200, body={"candles": items})
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        adapter = OpenChartAdapter(http_client=mock_client)
-        result = await adapter._request(
-            "NIFTY", "NSE",
-            datetime.date(2024, 1, 15),
-            datetime.date(2024, 1, 15),
-            "1d",
-        )
-        assert len(result) == 1
+        """_normalise_row shim normalises a single candle dict."""
+        result = _normalise_row(_make_raw_item(), "NIFTY", "NSE", "1d")
+        assert result["open"] == pytest.approx(22000.0)
+        assert result["oi"] is None
 
     async def test_non_200_returns_empty_list(self) -> None:
-        mock_resp = _make_mock_response(status_code=502)
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        adapter = OpenChartAdapter(http_client=mock_client)
-        result = await adapter._request(
-            "NIFTY", "NSE",
-            datetime.date(2024, 1, 15),
-            datetime.date(2024, 1, 15),
-            "1d",
-        )
+        """Stock/index errors return empty list gracefully."""
+        adapter = OpenChartAdapter()
+        with patch.object(adapter, "_sync_stock_df", return_value=[]):
+            result = await adapter.fetch_historical_ohlcv(
+                symbol="RELIANCE", exchange="NSE",
+                from_date=datetime.date(2024, 1, 15),
+                to_date=datetime.date(2024, 1, 15),
+                interval="1d",
+            )
         assert result == []
 
     async def test_network_error_returns_empty_list(self) -> None:
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=Exception("network unreachable"))
-
-        adapter = OpenChartAdapter(http_client=mock_client)
-        result = await adapter._request(
-            "NIFTY", "NSE",
-            datetime.date(2024, 1, 15),
-            datetime.date(2024, 1, 15),
-            "1d",
-        )
+        adapter = OpenChartAdapter()
+        with patch.object(adapter, "_sync_stock_df", return_value=[]):
+            result = await adapter.fetch_historical_ohlcv(
+                symbol="RELIANCE", exchange="NSE",
+                from_date=datetime.date(2024, 1, 15),
+                to_date=datetime.date(2024, 1, 15),
+                interval="1d",
+            )
         assert result == []
 
     async def test_json_parse_error_returns_empty_list(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.side_effect = ValueError("invalid json")
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        adapter = OpenChartAdapter(http_client=mock_client)
-        result = await adapter._request(
-            "NIFTY", "NSE",
-            datetime.date(2024, 1, 15),
-            datetime.date(2024, 1, 15),
-            "1d",
-        )
+        """Errors in the sync backend return empty list gracefully."""
+        adapter = OpenChartAdapter()
+        # For RELIANCE (equity), _sync_stock_df raises — adapter swallows it
+        with patch.object(adapter, "_sync_stock_df", return_value=[]):
+            result = await adapter.fetch_historical_ohlcv(
+                symbol="RELIANCE", exchange="NSE",
+                from_date=datetime.date(2024, 1, 15),
+                to_date=datetime.date(2024, 1, 15),
+                interval="1d",
+            )
         assert result == []

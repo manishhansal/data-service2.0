@@ -151,10 +151,11 @@ class TestValidateInstrumentType:
 
     @pytest.mark.parametrize(
         "instrument_type",
-        ["FO", "FUTIDX", "FUTSTK", "OPTIDX", "OPTSTK", "ETF", "IDX",
+        ["FO", "FUTIDX", "FUTSTK", "OPTIDX", "OPTSTK", "ETF",
          "CRYPTO_SPOT", "CRYPTO_FUTURES", "CRYPTO_OPTIONS"],
     )
     def test_non_eq_raises_yahoo_finance_instrument_error(self, instrument_type: str) -> None:
+        # IDX is now allowed (Yahoo provides ^NSEI, ^NSEBANK etc.)
         with pytest.raises(YahooFinanceInstrumentError):
             _validate_instrument_type(instrument_type)
 
@@ -184,7 +185,11 @@ class TestResolveYfSymbol:
         assert _resolve_yf_symbol("RELIANCE", "BSE") == "RELIANCE.BO"
 
     def test_nfo_exchange_gets_ns_suffix(self) -> None:
-        assert _resolve_yf_symbol("NIFTY", "NFO") == "NIFTY.NS"
+        # NIFTY is an NSE index — always maps to ^NSEI regardless of exchange
+        # An F&O symbol like NIFTY25JANFUT on NFO exchange gets .NS suffix
+        assert _resolve_yf_symbol("NIFTY25JANFUT", "NFO") == "NIFTY25JANFUT.NS"
+        # NIFTY itself maps to the Yahoo index ticker
+        assert _resolve_yf_symbol("NIFTY", "NFO") == "^NSEI"
 
     def test_symbol_already_with_suffix_unchanged(self) -> None:
         assert _resolve_yf_symbol("RELIANCE.NS", "NSE") == "RELIANCE.NS"
@@ -402,7 +407,7 @@ class TestFetchHistoricalOhlcvInstrumentEnforcement:
 
     @pytest.mark.parametrize(
         "instrument_type",
-        ["FO", "FUTIDX", "FUTSTK", "OPTIDX", "OPTSTK", "ETF", "IDX"],
+        ["FO", "FUTIDX", "FUTSTK", "OPTIDX", "OPTSTK", "ETF"],  # IDX now allowed (Yahoo provides NSE index data)
     )
     async def test_non_eq_instruments_raise(self, instrument_type: str) -> None:
         adapter = YahooFinanceAdapter()

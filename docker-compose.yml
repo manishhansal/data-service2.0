@@ -71,11 +71,15 @@ services:
       # ── Security ─────────────────────────────────────────────────────────
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
       SECRETS_BACKEND: "${SECRETS_BACKEND:-env}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_EXPIRY_SECONDS: "${JWT_EXPIRY_SECONDS:-3600}"
+      CONSUMER_API_KEYS: "${CONSUMER_API_KEYS}"
 
       # ── Provider credentials (injected from .env — never hardcoded) ─────
       ANGEL_ONE_API_KEY: "${ANGEL_ONE_API_KEY}"
       ANGEL_ONE_CLIENT_ID: "${ANGEL_ONE_CLIENT_ID}"
       ANGEL_ONE_TOTP_SECRET: "${ANGEL_ONE_TOTP_SECRET}"
+      ANGEL_ONE_MPIN: "${ANGEL_ONE_MPIN}"
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
@@ -127,9 +131,13 @@ services:
       OTEL_EXPORTER: "${OTEL_EXPORTER:-noop}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       SECRETS_BACKEND: "${SECRETS_BACKEND:-env}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_EXPIRY_SECONDS: "${JWT_EXPIRY_SECONDS:-3600}"
+      CONSUMER_API_KEYS: "${CONSUMER_API_KEYS}"
       ANGEL_ONE_API_KEY: "${ANGEL_ONE_API_KEY}"
       ANGEL_ONE_CLIENT_ID: "${ANGEL_ONE_CLIENT_ID}"
       ANGEL_ONE_TOTP_SECRET: "${ANGEL_ONE_TOTP_SECRET}"
+      ANGEL_ONE_MPIN: "${ANGEL_ONE_MPIN}"
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
@@ -170,9 +178,13 @@ services:
       OTEL_EXPORTER: "${OTEL_EXPORTER:-noop}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       SECRETS_BACKEND: "${SECRETS_BACKEND:-env}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_EXPIRY_SECONDS: "${JWT_EXPIRY_SECONDS:-3600}"
+      CONSUMER_API_KEYS: "${CONSUMER_API_KEYS}"
       ANGEL_ONE_API_KEY: "${ANGEL_ONE_API_KEY}"
       ANGEL_ONE_CLIENT_ID: "${ANGEL_ONE_CLIENT_ID}"
       ANGEL_ONE_TOTP_SECRET: "${ANGEL_ONE_TOTP_SECRET}"
+      ANGEL_ONE_MPIN: "${ANGEL_ONE_MPIN}"
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
@@ -222,6 +234,8 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: data-service-postgres
     restart: unless-stopped
+    ports:
+      - "5444:5432"
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-mds}"
       POSTGRES_USER: "${POSTGRES_USER:-mds_user}"

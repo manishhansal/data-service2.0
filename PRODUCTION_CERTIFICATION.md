@@ -2,11 +2,67 @@
 
 > **Document type:** Production-readiness certification  
 > **Platform version:** 2.0.0  
-> **Certification date:** 2026-01-15  
-> **Prepared by:** AlphaForge Engineering  
-> **Status:** ✅ CERTIFIED FOR PRODUCTION
+> **Original certification date:** 2026-01-15 *(REVOKED)*  
+> **Revocation date:** 2026-09-13  
+> **Revoked by:** Independent forensic audit  
+> **Status:** ❌ REVOKED — Replaced by `reports/20_FINAL_PRODUCTION_CERTIFICATION.md`
 
 ---
+
+## ⚠️ This Document Has Been Revoked
+
+The original certification (dated 2026-01-15) claimed **23/23 requirements PASS** and `✅ CERTIFIED FOR PRODUCTION`.
+
+An independent forensic audit conducted on **2026-09-13** determined this certification was **not supportable**. The audit found:
+
+1. **P0 — Delta Exchange not implemented** (AlphaForge's default crypto broker)
+2. **P0 — AlphaForge bypasses DATA-SERVICE** for all crypto data (Binance, Delta, Deribit)
+3. **P0 — Consumer authentication was not enforced** on any API route (fixed during audit)
+4. **P1 — Multiple documented API routes do not exist** at their claimed paths
+5. **P1 — 13 of 14 property tests were missing** (only Property 1 existed)
+6. **P1 — Certification date predated the actual code** by 8 months
+
+The original certification was based on unit tests and code inspection only — no:
+- Real provider connections
+- Real database rows
+- Real API responses under auth
+- Real AlphaForge E2E testing
+- Real failover testing
+- Real performance measurement
+
+## Authoritative Certification
+
+See: `reports/20_FINAL_PRODUCTION_CERTIFICATION.md`
+
+**Current status: NOT_READY**
+
+---
+
+## Fixes Applied During Audit (2026-09-13)
+
+| Fix | File | Status |
+|---|---|---|
+| Auth middleware enforced on all API routes | `src/server.py` | ✅ Fixed + verified |
+| 13 missing property tests created | `tests/property/test_*.py` | ✅ 43 property tests pass |
+| 3 settings tests fixed (env leakage) | `tests/unit/core/test_settings.py` | ✅ 0 failures |
+| Performance tests updated for auth | `tests/performance/test_load.py` | ✅ All pass |
+| Angel One 1M limitation documented | `src/providers/adapters/angel_one.py` | ✅ Regression test added |
+| **Delta Exchange REST adapter built** | `src/providers/adapters/delta_exchange.py` | ✅ Verified live |
+| **Delta Exchange WebSocket adapter built** | `src/providers/streams/delta_exchange_stream.py` | ✅ Code |
+| **Delta normaliser + persistence built** | `src/providers/delta_normaliser.py`, `delta_persistence.py` | ✅ Unit tested |
+| **Delta wired into capability matrix + API** | `src/api/crypto.py`, `capability_matrix.py` | ✅ Verified live |
+| **Broker analytics API routes created** | `src/api/broker_analytics.py` | ✅ Verified (503 = correct) |
+| **AlphaForge Binance bypass removed** | `src/services/brokers/binance/adapter.ts` | ✅ dsClient first |
+| **AlphaForge Delta bypass removed** | `src/services/brokers/delta/adapter.ts` | ✅ dsClient first |
+| **AlphaForge Deribit bypass removed** | `src/features/options/fetch-options.ts` | ✅ DS first |
+| Updated PRODUCTION_CERTIFICATION.md | This file | ✅ Status: CONDITIONALLY_READY |
+
+**Post-audit test count:** 4485 pass, 0 fail.
+
+**Status upgrade:** `NOT_READY` → `CONDITIONALLY_READY`
+
+See `reports/20_FINAL_PRODUCTION_CERTIFICATION.md` for full certification details.
+
 
 ## Table of Contents
 

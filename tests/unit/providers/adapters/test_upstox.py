@@ -93,7 +93,11 @@ class TestIntervalMapping:
             ("15m", "15minute"),
             ("30m", "30minute"),
             ("1h",  "60minute"),
-            ("1d",  "1day"),
+            # Upstox V2 uses "day"/"week"/"month" — NOT "1day"/"1week"/"1month".
+            # Verified 2026-09-14 against live Upstox V2 API.
+            ("1d",  "day"),
+            ("1w",  "week"),
+            ("1M",  "month"),
         ],
     )
     def test_interval_map_canonical_to_api(

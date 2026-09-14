@@ -327,7 +327,7 @@ async def get_crypto_ohlcv(
 
     # ── Fetch from Binance ─────────────────────────────────────────────────
     client = _get_binance_client(request)
-    symbol_upper = symbol.upper()
+    symbol_upper = _normalize_binance_symbol(symbol)
 
     try:
         raw_candles = await client.get_klines(
@@ -378,6 +378,39 @@ async def get_crypto_ohlcv(
 
 
 # ---------------------------------------------------------------------------
+# Symbol normalisation helper
+# ---------------------------------------------------------------------------
+
+# Known Binance quote currencies in priority order.  When a caller supplies a
+# bare base asset (e.g. "BTC" or "sol") we append the default quote currency
+# so that the Binance REST API receives a valid trading-pair symbol.
+_KNOWN_QUOTE_CURRENCIES: tuple[str, ...] = (
+    "USDT", "USDC", "BUSD", "BTC", "ETH", "BNB",
+)
+_DEFAULT_QUOTE_CURRENCY = "USDT"
+
+
+def _normalize_binance_symbol(symbol: str) -> str:
+    """Return a valid Binance trading-pair symbol from *symbol*.
+
+    If *symbol* already ends with a known quote currency it is returned as-is
+    (uppercased).  Otherwise ``USDT`` is appended so that a caller passing
+    ``"BTC"`` or ``"sol"`` gets ``"BTCUSDT"``/``"SOLUSDT"`` respectively.
+
+    Examples::
+
+        _normalize_binance_symbol("BTC")     -> "BTCUSDT"
+        _normalize_binance_symbol("btc")     -> "BTCUSDT"
+        _normalize_binance_symbol("BTCUSDT") -> "BTCUSDT"
+        _normalize_binance_symbol("ETHBTC")  -> "ETHBTC"
+    """
+    upper = symbol.upper()
+    if any(upper.endswith(q) for q in _KNOWN_QUOTE_CURRENCIES):
+        return upper
+    return upper + _DEFAULT_QUOTE_CURRENCY
+
+
+# ---------------------------------------------------------------------------
 # GET /v1/crypto/{symbol}/ticker
 # ---------------------------------------------------------------------------
 
@@ -404,7 +437,7 @@ async def get_crypto_ticker(
     """
     req_id = _request_id()
     client = _get_binance_client(request)
-    symbol_upper = symbol.upper()
+    symbol_upper = _normalize_binance_symbol(symbol)
 
     try:
         ticker = await client.get_ticker_price(symbol_upper)
@@ -457,7 +490,7 @@ async def get_crypto_stats(
     """
     req_id = _request_id()
     client = _get_binance_client(request)
-    symbol_upper = symbol.upper()
+    symbol_upper = _normalize_binance_symbol(symbol)
 
     try:
         stats = await client.get_24hr_stats(symbol_upper)
@@ -685,4 +718,302 @@ async def get_futures_overview(
 
     return _json_response(
         _success_envelope(overview, provider="binance", data_source_type="LIVE")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Delta Exchange endpoints  (DS2-RCA-001 fix)
+# ---------------------------------------------------------------------------
+# AlphaForge's default broker is Delta Exchange India.  These endpoints allow
+# AlphaForge to retrieve Delta data through DATA-SERVICE instead of calling
+# the Delta API directly.
+#
+# Tracked Delta symbols (INR-settled perpetuals):
+#   BTCUSD  ETHUSD  SOLUSD   (NOT USDT-quoted — Delta India uses USD)
+# ---------------------------------------------------------------------------
+
+_DELTA_TRACKED_SYMBOLS: tuple[str, ...] = ("BTCUSD", "ETHUSD", "SOLUSD")
+
+from src.providers.adapters.delta_exchange import DeltaClient, DELTA_INTERVALS  # noqa: E402
+from src.providers.delta_normaliser import DeltaOHLCVNormaliser  # noqa: E402
+
+_delta_normaliser = DeltaOHLCVNormaliser()
+
+
+def _get_delta_client(request: Request) -> DeltaClient:
+    """Resolve the DeltaClient from application state (lazy-created)."""
+    client = getattr(request.app.state, "delta_client", None)
+    if client is None:
+        client = DeltaClient()
+        request.app.state.delta_client = client
+    return client
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/delta/{symbol}/ohlcv
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/delta/{symbol}/ohlcv",
+    summary="Delta Exchange OHLCV candles",
+    description=(
+        "Returns normalised OHLCV candles for the given Delta Exchange symbol. "
+        "Use Delta-style symbols: BTCUSD, ETHUSD, SOLUSD (not USDT-quoted). "
+        "The ``3m`` interval is valid for Delta crypto. "
+        "Parameters: interval (required), limit (1–2000, default 100), "
+        "from/to as optional ISO-8601 datetime strings. "
+        "(DS2-RCA-001 fix)"
+    ),
+    response_class=Response,
+)
+async def get_delta_ohlcv(
+    request: Request,
+    symbol: str,
+    interval: Annotated[
+        str,
+        Query(
+            description=(
+                "Candle interval. Supported: "
+                + ", ".join(sorted(DELTA_INTERVALS))
+                + ". 3m is valid for crypto."
+            )
+        ),
+    ],
+    limit: Annotated[
+        int,
+        Query(description="Number of candles (1–2000). Default: 100.", ge=1, le=2000),
+    ] = 100,
+    from_date: Annotated[
+        Optional[str],
+        Query(alias="from", description="Start as UTC ISO-8601 (e.g. 2024-01-01)."),
+    ] = None,
+    to_date: Annotated[
+        Optional[str],
+        Query(alias="to", description="End as UTC ISO-8601 (e.g. 2024-03-01)."),
+    ] = None,
+) -> Response:
+    """Return normalised Delta Exchange OHLCV candles for *symbol*."""
+    req_id = _request_id()
+
+    if interval not in DELTA_INTERVALS:
+        return _json_response(
+            _error_envelope(
+                "INTERVAL_NOT_SUPPORTED",
+                f"interval '{interval}' is not a supported Delta interval. "
+                f"Supported: {', '.join(sorted(DELTA_INTERVALS))}.",
+                request_id=req_id,
+                provider="delta",
+            ),
+            status_code=400,
+        )
+
+    import time as _t  # noqa: PLC0415
+    from src.providers.adapters.delta_exchange import _INTERVAL_SECONDS  # noqa: PLC0415
+
+    # Parse from/to or derive from limit.
+    end_sec = int(_t.time())
+    interval_sec = _INTERVAL_SECONDS.get(interval, 60)
+    start_sec = end_sec - (limit + 2) * interval_sec  # default window
+
+    if from_date is not None:
+        try:
+            from_dt = _parse_iso_datetime(from_date)
+            start_sec = int(from_dt.timestamp())
+        except ValueError:
+            return _json_response(
+                _error_envelope("INVALID_PARAMETER", f"Invalid 'from': '{from_date}'", request_id=req_id),
+                status_code=400,
+            )
+
+    if to_date is not None:
+        try:
+            to_dt = _parse_iso_datetime(to_date)
+            end_sec = int(to_dt.timestamp())
+        except ValueError:
+            return _json_response(
+                _error_envelope("INVALID_PARAMETER", f"Invalid 'to': '{to_date}'", request_id=req_id),
+                status_code=400,
+            )
+
+    if start_sec >= end_sec:
+        return _json_response(
+            _error_envelope("INVALID_PARAMETER", "'from' must be earlier than 'to'.", request_id=req_id),
+            status_code=400,
+        )
+
+    client = _get_delta_client(request)
+    symbol_upper = symbol.upper()
+
+    try:
+        raw_candles = await client.get_candles(
+            symbol=symbol_upper,
+            interval=interval,
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "delta_api.ohlcv_fetch_failed",
+            component="delta_api",
+            symbol=symbol_upper,
+            interval=interval,
+            error=str(exc),
+        )
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_UNAVAILABLE",
+                f"Failed to fetch Delta candles for {symbol_upper}: {exc}",
+                request_id=req_id,
+                provider="delta",
+            ),
+            status_code=502,
+        )
+
+    records = _delta_normaliser.normalise_batch(raw_candles, symbol=symbol_upper, interval=interval)
+    # Trim to requested limit (take most recent).
+    records = records[-limit:] if len(records) > limit else records
+    data = [r.model_dump() for r in records]
+
+    data_as_of = _utc_iso_now()
+    if data:
+        data_as_of = datetime.fromtimestamp(
+            records[-1].closeTime / 1000, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    return _json_response(
+        _success_envelope(
+            data,
+            provider="delta",
+            data_source_type="HISTORICAL" if from_date else "LIVE",
+            data_as_of=data_as_of,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/delta/{symbol}/ticker
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/delta/{symbol}/ticker",
+    summary="Delta Exchange ticker",
+    description=(
+        "Returns the current normalised ticker for the given Delta Exchange symbol. "
+        "Use Delta-style symbols: BTCUSD, ETHUSD, SOLUSD. "
+        "(DS2-RCA-001 fix)"
+    ),
+    response_class=Response,
+)
+async def get_delta_ticker(request: Request, symbol: str) -> Response:
+    """Return a normalised Delta Exchange ticker for *symbol*."""
+    req_id = _request_id()
+    client = _get_delta_client(request)
+    symbol_upper = symbol.upper()
+
+    try:
+        ticker = await client.get_ticker(symbol_upper)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "delta_api.ticker_fetch_failed",
+            component="delta_api",
+            symbol=symbol_upper,
+            error=str(exc),
+        )
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_UNAVAILABLE",
+                f"Failed to fetch Delta ticker for {symbol_upper}: {exc}",
+                request_id=req_id,
+                provider="delta",
+            ),
+            status_code=502,
+        )
+
+    return _json_response(
+        _success_envelope(ticker, provider="delta", data_source_type="LIVE")
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/delta/futures/overview
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/delta/futures/overview",
+    summary="Delta Exchange futures overview",
+    description=(
+        "Returns perpetual futures overview for BTCUSD, ETHUSD, SOLUSD on "
+        "Delta Exchange India: mark price, funding rate, OI, OI change 1h. "
+        "Note: Delta India does NOT provide a long/short ratio endpoint — "
+        "longShortRatio / longAccount / shortAccount will be null. "
+        "(DS2-RCA-001 fix)"
+    ),
+    response_class=Response,
+)
+async def get_delta_futures_overview(request: Request) -> Response:
+    """Return Delta Exchange perpetual futures overview for tracked symbols."""
+    client = _get_delta_client(request)
+    overview = []
+
+    for symbol in _DELTA_TRACKED_SYMBOLS:
+        symbol_data: dict[str, Any] = {
+            "symbol":                   symbol,
+            "exchange":                 "DELTA",
+            "markPrice":                None,
+            "indexPrice":               None,
+            "fundingRate":              None,
+            "fundingRateAnnualized":    None,
+            "nextFundingTime":          0,
+            "openInterest":             None,
+            "openInterestNotionalUsd":  None,
+            "oiChangePct1h":            None,
+            "longShortRatio":           None,   # Unavailable on Delta India
+            "longAccount":              None,   # Unavailable on Delta India
+            "shortAccount":             None,   # Unavailable on Delta India
+        }
+
+        # Mark price + funding rate.
+        try:
+            premium = await client.get_premium_index(symbol)
+            symbol_data.update({
+                "markPrice":             premium.get("markPrice"),
+                "indexPrice":            premium.get("indexPrice"),
+                "fundingRate":           premium.get("fundingRate"),
+                "fundingRateAnnualized": premium.get("fundingRateAnnualized"),
+                "nextFundingTime":       premium.get("nextFundingTime", 0),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("delta_api.premium_index_failed", symbol=symbol, error=str(exc))
+
+        # OI from ticker.
+        try:
+            ticker = await client.get_ticker(symbol)
+            symbol_data["openInterest"] = ticker.get("openInterest")
+            mark = symbol_data.get("markPrice") or ticker.get("markPrice") or 0
+            oi = symbol_data.get("openInterest") or 0
+            if mark and oi:
+                symbol_data["openInterestNotionalUsd"] = float(oi) * float(mark)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("delta_api.oi_fetch_failed", symbol=symbol, error=str(exc))
+
+        # OI history for 1h change.
+        try:
+            oi_hist = await client.get_oi_history(symbol, interval="1h", limit=2)
+            if len(oi_hist) >= 2:
+                oi_now = float(oi_hist[-1]["openInterest"])
+                oi_prev = float(oi_hist[-2]["openInterest"])
+                if oi_prev != 0:
+                    symbol_data["oiChangePct1h"] = round(
+                        (oi_now - oi_prev) / abs(oi_prev) * 100, 4
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("delta_api.oi_history_failed", symbol=symbol, error=str(exc))
+
+        overview.append(symbol_data)
+
+    return _json_response(
+        _success_envelope(overview, provider="delta", data_source_type="LIVE")
     )

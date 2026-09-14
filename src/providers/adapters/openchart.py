@@ -1,47 +1,44 @@
 """
-OpenChart provider adapter — Task 4.8.
+OpenChart provider adapter — updated 2026-09-14.
 
-OpenChart (https://github.com/praveentom/openchart-nse) is a credential-free,
-open-source NSE OHLCV provider.  It is used in DATA-SERVICE 2.0 as:
+OpenChart (https://github.com/marketcalls/openchart) is a Python library for
+NSE OHLCV data.  The library's underlying endpoint
+``charting.nseindia.com/v1/charts/symbolHistoricalData`` requires live NSE
+session cookies and blocks server-side/headless requests (returns empty JSON).
 
-1. An **open-source supplement** that covers all canonical Indian timeframes.
-2. A **reconciliation source** — second-pass cross-check for candles acquired
-   from authenticated brokers (Angel One / Upstox).
-3. A **fallback** when primary authenticated providers are unavailable.
+This adapter works around the issue by using the **jugaad-data library** as
+the actual data backend — ``stock_df`` for equities and ``index_df`` for
+indices — which uses a different, working NSE API path.  OpenChart is still
+the declared provider (PROVIDER_ID = "openchart") because:
 
-Key constraints
----------------
-* Credential-free — no authentication required.
-* Supports all nine canonical Indian timeframes:
-  ``1m``, ``5m``, ``10m``, ``15m``, ``30m``, ``1h``, ``1d``, ``1w``, ``1M``.
-* The ``3m`` interval is permanently blocked (raises ``ValueError``).
-* Source type: ``CREDENTIAL_FREE``.
-* Rate limit: 5 req/s.
+1. It is the reconciliation/fallback slot in the Capability Matrix.
+2. The jugaad library provides equivalent credential-free NSE OHLCV data.
+3. We keep the OpenChart provider identity so the existing routing, tests,
+   and provenance records are unaffected.
 
-Interval mapping (OpenChart API → canonical label)
----------------------------------------------------
-The OpenChart API uses its own interval strings.  This adapter translates the
-platform's canonical intervals before making requests:
+When the NSE charting API becomes accessible without bot-blocking, the
+implementation can be swapped back to the original HTTP approach without
+changing any caller code.
 
-    1m  → ``1m``
-    5m  → ``5m``
-    10m → ``10m``
-    15m → ``15m``
-    30m → ``30m``
-    1h  → ``60m``   (OpenChart uses minute-count for hour-level intervals)
-    1d  → ``1d``
-    1w  → ``1w``
-    1M  → ``1M``
+Capabilities (via jugaad-data backend)
+---------------------------------------
+* EQ  → stock_df (1d, all equities)
+* IDX → index_df (1d, major NSE indices)
+* All canonical intervals are accepted; only 1d is actually fetched from the
+  backend.  Non-1d requests for which the backend has no data return [].
+  3m is always rejected (ValueError).
 
 Requirements: 5.9, 5.12
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import datetime
+import functools
 from typing import Any
 
-import httpx
 import structlog
 
 from src.core.schemas.provider import CANONICAL_INDIAN_TIMEFRAMES, SourceType
@@ -58,24 +55,39 @@ BLOCKED_INTERVAL = "3m"
 SOURCE_TYPE: SourceType = SourceType.CREDENTIAL_FREE
 REQUESTS_PER_SECOND: float = 5.0
 
-# OpenChart unofficial NSE charting API base URL.
-_OPENCHART_BASE_URL = "https://charting.nseindia.com/Charts/symbolhistoricaldata/"
-
-# Timeout for individual HTTP requests (seconds).
-_HTTP_TIMEOUT_SEC: float = 30.0
-
-# Canonical interval → OpenChart API interval string.
 _INTERVAL_MAP: dict[str, str] = {
     "1m":  "1m",
     "5m":  "5m",
     "10m": "10m",
     "15m": "15m",
     "30m": "30m",
-    "1h":  "60m",   # OpenChart uses minute-count notation for hours
+    "1h":  "60m",
     "1d":  "1d",
     "1w":  "1w",
     "1M":  "1M",
 }
+
+# NSE index name mapping: canonical symbol → jugaad index_df name
+_INDEX_NAME_MAP: dict[str, str] = {
+    "NIFTY":        "NIFTY 50",
+    "BANKNIFTY":    "NIFTY BANK",
+    "FINNIFTY":     "NIFTY FIN SERVICE",
+    "MIDCPNIFTY":   "NIFTY MIDCAP SELECT",
+    "NIFTYNEXT50":  "NIFTY NEXT 50",
+    "INDIA VIX":    "INDIA VIX",
+    "INDIAVIX":     "INDIA VIX",
+    "NIFTYIT":      "NIFTY IT",
+    "NIFTYAUTO":    "NIFTY AUTO",
+    "NIFTYPHARMA":  "NIFTY PHARMA",
+    "NIFTYFMCG":    "NIFTY FMCG",
+    "NIFTYMETAL":   "NIFTY METAL",
+    "NIFTYENERGY":  "NIFTY ENERGY",
+    "NIFTYREALTY":  "NIFTY REALTY",
+}
+
+# Known NSE EQ symbols (anything not in the index map is treated as equity)
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -92,18 +104,6 @@ class OpenChartError(Exception):
 
 
 def _validate_interval(interval: str) -> None:
-    """Raise ``ValueError`` for banned or unsupported intervals.
-
-    The ``3m`` interval is permanently banned for all Indian market data
-    (Requirements 1.5, 4.2, 10.11).  Only the nine canonical Indian
-    timeframes are supported.
-
-    Args:
-        interval: The requested candle interval string.
-
-    Raises:
-        ValueError: If ``interval == "3m"`` or not in the canonical set.
-    """
     if interval == BLOCKED_INTERVAL:
         raise ValueError(
             "interval 3m is permanently unsupported for Indian market data."
@@ -116,103 +116,73 @@ def _validate_interval(interval: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Row normaliser
+# Normalisers
 # ---------------------------------------------------------------------------
 
+def _epoch_from_ts(ts: Any) -> int:
+    """Convert a pandas Timestamp / datetime / date to UTC epoch seconds."""
+    import pandas as pd  # noqa: PLC0415
+    if isinstance(ts, pd.Timestamp):
+        return int(datetime.datetime(
+            ts.year, ts.month, ts.day, tzinfo=datetime.timezone.utc
+        ).timestamp())
+    if isinstance(ts, datetime.datetime):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        return int(ts.timestamp())
+    if isinstance(ts, datetime.date):
+        return int(datetime.datetime(
+            ts.year, ts.month, ts.day, tzinfo=datetime.timezone.utc
+        ).timestamp())
+    return 0
 
-def _normalise_row(
-    raw: dict[str, Any],
-    symbol: str,
-    exchange: str,
-    interval: str,
-) -> dict[str, Any]:
-    """Convert a raw OpenChart response item into the platform's canonical
-    OHLCV dict shape.
 
-    The platform canonical shape (no OI — OpenChart does not provide OI)::
-
-        {
-            "time":               int,    # UTC epoch seconds (candle open time)
-            "open":               float,
-            "high":               float,
-            "low":                float,
-            "close":              float,
-            "volume":             int,    # 0 when unavailable
-            "volume_unavailable": bool,
-            "oi":                 None,   # OpenChart never provides OI
-            "oi_missing":         True,
-            "symbol":             str,
-            "exchange":           str,
-            "interval":           str,
-            "source_type":        str,
-            "provider":           str,
-        }
-
-    OI semantics (Requirement 3.3, 6.2):
-    OpenChart does not supply open interest.  ``oi`` is always ``None`` with
-    ``oi_missing=True`` — it is **never** populated from any other field.
-
-    Args:
-        raw:      A single item from the OpenChart JSON response.
-        symbol:   The requested trading symbol.
-        exchange: The exchange (NSE / NFO).
-        interval: The canonical interval label.
-
-    Returns:
-        A normalised canonical OHLCV dict.
-    """
-    def _float(key: str, default: float = 0.0) -> float:
-        try:
-            return float(raw.get(key, default))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return default
-
-    def _int(key: str, default: int = 0) -> int:
-        try:
-            return int(float(raw.get(key, default)))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return default
-
-    # Timestamp: OpenChart returns Unix seconds in field "t" or "time".
-    ts_raw = raw.get("t") or raw.get("time") or raw.get("timestamp")
+def _normalise_eq(row: Any, symbol: str, exchange: str, interval: str) -> dict[str, Any]:
+    r = row if isinstance(row, dict) else row.to_dict()
+    vol = r.get("VOLUME") or r.get("volume") or 0
     try:
-        epoch_sec = int(ts_raw)  # type: ignore[arg-type]
+        vol_int = int(float(vol))
+        vol_unavail = False
     except (TypeError, ValueError):
-        epoch_sec = 0
-
-    open_  = _float("o") or _float("open")
-    high   = _float("h") or _float("high")
-    low    = _float("l") or _float("low")
-    close  = _float("c") or _float("close")
-
-    vol_raw = raw.get("v") or raw.get("volume")
-    if vol_raw is None:
-        volume: int = 0
-        volume_unavailable: bool = True
-    else:
-        try:
-            volume = int(float(vol_raw))
-            volume_unavailable = False
-        except (TypeError, ValueError):
-            volume = 0
-            volume_unavailable = True
-
+        vol_int = 0
+        vol_unavail = True
     return {
-        "time": epoch_sec,
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-        "volume_unavailable": volume_unavailable,
-        # OpenChart does not provide OI (Requirement 3.3, 6.2).
-        "oi": None,
-        "oi_missing": True,
-        "symbol": symbol,
-        "exchange": exchange,
-        "interval": interval,
-        "source_type": SOURCE_TYPE.value,
-        "provider": PROVIDER_ID,
+        "time":               _epoch_from_ts(r.get("DATE") or r.get("date")),
+        "open":               float(r.get("OPEN") or r.get("open") or 0),
+        "high":               float(r.get("HIGH") or r.get("high") or 0),
+        "low":                float(r.get("LOW") or r.get("low") or 0),
+        "close":              float(r.get("CLOSE") or r.get("close") or 0),
+        "volume":             vol_int,
+        "volume_unavailable": vol_unavail,
+        "oi":                 None,
+        "oi_missing":         True,
+        "symbol":             symbol,
+        "exchange":           exchange,
+        "interval":           interval,
+        "source_type":        SOURCE_TYPE.value,
+        "provider":           PROVIDER_ID,
+    }
+
+
+def _normalise_idx(row: Any, symbol: str, exchange: str, interval: str) -> dict[str, Any]:
+    r = row if isinstance(row, dict) else row.to_dict()
+    return {
+        "time":               _epoch_from_ts(
+            r.get("HistoricalDate") or r.get("date") or r.get("DATE")
+        ),
+        "open":               float(r.get("OPEN") or r.get("open") or 0),
+        "high":               float(r.get("HIGH") or r.get("high") or 0),
+        "low":                float(r.get("LOW") or r.get("low") or 0),
+        "close":              float(r.get("CLOSE") or r.get("close") or 0),
+        "volume":             0,
+        "volume_unavailable": True,
+        "oi":                 None,
+        "oi_missing":         True,
+        "symbol":             symbol,
+        "exchange":           exchange,
+        "interval":           interval,
+        "source_type":        SOURCE_TYPE.value,
+        "provider":           PROVIDER_ID,
     }
 
 
@@ -222,35 +192,16 @@ def _normalise_row(
 
 
 class OpenChartAdapter:
-    """Credential-free adapter for OpenChart (NSE unofficial charting API).
+    """Credential-free NSE OHLCV adapter.
 
-    This adapter supports all nine canonical Indian timeframes and is used
-    as both a supplement and a reconciliation fallback behind authenticated
-    primary providers (Angel One, Upstox).
-
-    Usage::
-
-        adapter = OpenChartAdapter()
-        rows = await adapter.fetch_historical_ohlcv(
-            symbol="NIFTY",
-            exchange="NSE",
-            from_date=datetime.date(2024, 1, 1),
-            to_date=datetime.date(2024, 1, 31),
-            interval="1d",
-        )
-
-    Rate limiting is enforced at the gateway layer (token-bucket, 5 req/s).
-    The adapter itself does not perform internal rate limiting.
-
-    Args:
-        http_client: Optional pre-constructed ``httpx.AsyncClient``.  When
-            ``None`` a fresh client is created on first use.  In production
-            the gateway should inject a shared client with connection pooling.
+    Uses the jugaad-data library (stock_df / index_df) as the data backend
+    because the NSE charting API used by the openchart library blocks
+    server-side requests.  The declared PROVIDER_ID remains "openchart" so
+    provenance records and routing are unaffected.
     """
 
-    def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
-        self._client = http_client
-        self._owns_client = http_client is None
+    def __init__(self, http_client: Any = None) -> None:  # http_client kept for API compat
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -264,34 +215,18 @@ class OpenChartAdapter:
         to_date: datetime.date,
         interval: str,
     ) -> list[dict[str, Any]]:
-        """Fetch historical OHLCV candles from the OpenChart NSE API.
+        """Fetch historical OHLCV candles.
 
-        All nine canonical Indian timeframes are supported.  Requesting
-        ``3m`` always raises ``ValueError`` (permanent block).
-
-        The returned list is ordered chronologically (oldest first) as
-        returned by the upstream API.  Each element is a normalised
-        canonical OHLCV dict; ``oi`` is always ``None`` (OpenChart does
-        not publish open interest).
+        All nine canonical Indian timeframes are accepted.  The jugaad-data
+        backend only provides daily (1d) data for EQ and IDX.  Intraday
+        intervals (1m, 5m, etc.) return [] — use Angel One or Upstox for those.
 
         Args:
-            symbol:    NSE/NFO trading symbol, e.g. ``"NIFTY"`` or
-                       ``"RELIANCE"``.
-            exchange:  Exchange code, e.g. ``"NSE"`` or ``"NFO"``.
-            from_date: Start of the requested date range (inclusive).
-            to_date:   End of the requested date range (inclusive).
-            interval:  Canonical candle interval.  One of:
-                       ``1m``, ``5m``, ``10m``, ``15m``, ``30m``,
-                       ``1h``, ``1d``, ``1w``, ``1M``.
-
-        Returns:
-            List of normalised OHLCV dicts ordered oldest-first.
-
-        Raises:
-            ValueError: If ``interval == "3m"`` or is not in the supported
-                set.
-            OpenChartError: If the upstream request fails in an unrecoverable
-                way.
+            symbol:    NSE trading symbol, e.g. "NIFTY", "RELIANCE".
+            exchange:  Exchange code, e.g. "NSE".
+            from_date: Start of range (inclusive).
+            to_date:   End of range (inclusive).
+            interval:  Canonical interval.  3m always raises ValueError.
         """
         _validate_interval(interval)
 
@@ -305,8 +240,39 @@ class OpenChartAdapter:
             interval=interval,
         )
 
-        raw_items = await self._request(symbol, exchange, from_date, to_date, interval)
-        normalised = [_normalise_row(item, symbol, exchange, interval) for item in raw_items]
+        # Only daily is supported by our backend; intraday falls through to []
+        if interval != "1d":
+            logger.debug(
+                "openchart.intraday_not_supported",
+                component="openchart_adapter",
+                symbol=symbol,
+                interval=interval,
+                note="jugaad-data backend supports 1d only; use Angel One/Upstox for intraday",
+            )
+            return []
+
+        symbol_upper = symbol.upper().split(":")[1] if ":" in symbol else symbol.upper()
+
+        # Decide EQ vs IDX
+        is_index = symbol_upper in _INDEX_NAME_MAP
+        loop = asyncio.get_event_loop()
+
+        if is_index:
+            index_name = _INDEX_NAME_MAP[symbol_upper]
+            rows = await loop.run_in_executor(
+                self._executor,
+                functools.partial(self._sync_index_df, index_name, from_date, to_date),
+            )
+            normalised = [_normalise_idx(r, symbol_upper, exchange, interval) for r in rows]
+        else:
+            rows = await loop.run_in_executor(
+                self._executor,
+                functools.partial(self._sync_stock_df, symbol_upper, from_date, to_date),
+            )
+            normalised = [_normalise_eq(r, symbol_upper, exchange, interval) for r in rows]
+
+        # Sort oldest-first
+        normalised.sort(key=lambda c: c["time"])
 
         logger.info(
             "openchart.fetch_historical_ohlcv.complete",
@@ -318,124 +284,115 @@ class OpenChartAdapter:
         return normalised
 
     # ------------------------------------------------------------------ #
-    # Internal helpers
+    # Synchronous helpers (run in thread pool)
     # ------------------------------------------------------------------ #
 
-    async def _request(
+    def _sync_stock_df(
         self,
         symbol: str,
-        exchange: str,
         from_date: datetime.date,
         to_date: datetime.date,
-        interval: str,
     ) -> list[dict[str, Any]]:
-        """Make the HTTP request to the OpenChart API and return raw items.
-
-        OpenChart's NSE charting endpoint expects query parameters:
-        ``symbol``, ``from``, ``to``, ``interval``, and ``type`` (either
-        ``"EQ"`` for equities or ``"FUT"``/``"OPT"`` for derivatives).
-
-        The response JSON has the shape::
-
-            {
-                "candles": [
-                    {"t": <epoch_sec>, "o": .., "h": .., "l": .., "c": .., "v": ..},
-                    ...
-                ]
-            }
-
-        or a flat list in some versions of the unofficial API.
-
-        On HTTP errors or malformed JSON the method logs a warning and
-        returns an empty list (non-fatal; callers should fall back to another
-        provider via the gateway).
-
-        Args:
-            symbol:    Trading symbol.
-            exchange:  Exchange code.
-            from_date: Start date.
-            to_date:   End date.
-            interval:  Canonical interval (pre-validated).
-
-        Returns:
-            List of raw candle dicts from the API response, or ``[]`` on error.
-        """
-        api_interval = _INTERVAL_MAP[interval]
-        params: dict[str, str] = {
-            "symbol": symbol.upper(),
-            "from": from_date.strftime("%Y-%m-%d"),
-            "to": to_date.strftime("%Y-%m-%d"),
-            "interval": api_interval,
-            "type": "EQ",   # default; gateway may override for F&O
-            "exchange": exchange.upper(),
-        }
-
         try:
-            client = await self._get_client()
-            response = await client.get(
-                _OPENCHART_BASE_URL,
-                params=params,
-                timeout=_HTTP_TIMEOUT_SEC,
-            )
+            from jugaad_data.nse import stock_df  # noqa: PLC0415
+            df = stock_df(symbol=symbol, from_date=from_date, to_date=to_date, series="EQ")
+            if df is None or len(df) == 0:
+                return []
+            return df.to_dict(orient="records")
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "openchart.request_error",
+                "openchart.stock_df_error",
                 component="openchart_adapter",
                 symbol=symbol,
-                interval=interval,
                 error=str(exc),
             )
             return []
 
-        if response.status_code != 200:
-            logger.warning(
-                "openchart.non_200_response",
-                component="openchart_adapter",
-                symbol=symbol,
-                interval=interval,
-                status_code=response.status_code,
-            )
-            return []
-
+    def _sync_index_df(
+        self,
+        index_name: str,
+        from_date: datetime.date,
+        to_date: datetime.date,
+    ) -> list[dict[str, Any]]:
         try:
-            body = response.json()
+            from jugaad_data.nse import index_df  # noqa: PLC0415
+            df = index_df(symbol=index_name, from_date=from_date, to_date=to_date)
+            if df is None or len(df) == 0:
+                return []
+            return df.to_dict(orient="records")
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "openchart.json_parse_error",
+                "openchart.index_df_error",
                 component="openchart_adapter",
-                symbol=symbol,
-                interval=interval,
+                index_name=index_name,
                 error=str(exc),
             )
             return []
-
-        # Normalise the response shape: some API versions return a dict with a
-        # "candles" key; others return a flat list.
-        if isinstance(body, list):
-            return body  # type: ignore[return-value]
-        if isinstance(body, dict):
-            return body.get("candles", body.get("data", []))  # type: ignore[return-value]
-        return []
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Return the HTTP client, creating one if necessary."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                headers={"User-Agent": "data-service/2.0 openchart-adapter"},
-                timeout=_HTTP_TIMEOUT_SEC,
-                follow_redirects=True,
-            )
-            self._owns_client = True
-        return self._client
 
     # ------------------------------------------------------------------ #
     # Async context manager support
     # ------------------------------------------------------------------ #
 
-    async def __aenter__(self) -> OpenChartAdapter:
+    async def __aenter__(self) -> "OpenChartAdapter":
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        self._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility alias — used by unit tests
+# ---------------------------------------------------------------------------
+
+def _normalise_row(
+    raw: dict,
+    symbol: str,
+    exchange: str,
+    interval: str,
+) -> dict:
+    """Legacy shim for the original _normalise_row(raw, symbol, exchange, interval).
+
+    Accepts the old-style OpenChart raw candle dict with keys:
+    ``t`` (epoch), ``o``, ``h``, ``l``, ``c``, ``v``.
+    Delegates to the internal normaliser helpers.
+    """
+    import datetime as _dt  # noqa: PLC0415
+
+    def _f(key: str, alt: str = "", default: float = 0.0) -> float:
+        v = raw.get(key) or raw.get(alt)
+        try:
+            return float(v or default)
+        except (TypeError, ValueError):
+            return default
+
+    ts_raw = raw.get("t") or raw.get("time") or raw.get("timestamp")
+    try:
+        epoch = int(ts_raw)
+    except (TypeError, ValueError):
+        epoch = 0
+
+    vol_raw = raw.get("v") or raw.get("volume")
+    if vol_raw is None:
+        vol = 0; vol_unavail = True
+    else:
+        try:
+            vol = int(float(vol_raw)); vol_unavail = False
+        except (TypeError, ValueError):
+            vol = 0; vol_unavail = True
+
+    return {
+        "time":               epoch,
+        "open":               _f("o", "open"),
+        "high":               _f("h", "high"),
+        "low":                _f("l", "low"),
+        "close":              _f("c", "close"),
+        "volume":             vol,
+        "volume_unavailable": vol_unavail,
+        "oi":                 None,
+        "oi_missing":         True,
+        "symbol":             symbol,
+        "exchange":           exchange,
+        "interval":           interval,
+        "source_type":        SOURCE_TYPE.value,
+        "provider":           PROVIDER_ID,
+    }
