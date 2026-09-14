@@ -56,6 +56,16 @@ from src.engines.holiday_calendar import HolidayCalendar
 from src.engines.market_session import MarketSessionEngine
 from src.observability.logging import get_logger
 
+# AngelOneAdapter — optional; engine still boots without credentials.
+# When configured, live quote and option chain are served from real Angel One
+# SmartAPI rather than the Phase-8 stub.
+try:
+    from src.providers.adapters.angel_one import AngelOneAdapter as _AngelOneAdapter
+    _ANGEL_ONE_AVAILABLE = True
+except ImportError:
+    _AngelOneAdapter = None  # type: ignore[assignment,misc]
+    _ANGEL_ONE_AVAILABLE = False
+
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -98,6 +108,7 @@ class MarketEngine:
         session_engine: Optional[MarketSessionEngine] = None,
         holiday_calendar: Optional[HolidayCalendar] = None,
         normaliser: Optional[Normaliser] = None,
+        angel_one_adapter: Optional[Any] = None,
     ) -> None:
         """Initialise the Market Engine.
 
@@ -110,6 +121,10 @@ class MarketEngine:
                 classification falls back to weekend-only checks.
             normaliser: ``Normaliser`` instance.  When ``None`` a default
                 instance is created.
+            angel_one_adapter: Optional ``AngelOneAdapter`` instance.  When
+                provided, live quotes and option chains are served from real
+                Angel One SmartAPI instead of the Phase-8 stub.  When
+                ``None`` the engine degrades to returning stub (null) values.
         """
         # Resolve holiday calendar
         if holiday_calendar is None:
@@ -129,6 +144,9 @@ class MarketEngine:
 
         # Normaliser
         self._normaliser: Normaliser = normaliser or Normaliser()
+
+        # Angel One adapter for live data — None means stub mode
+        self._angel_one: Optional[Any] = angel_one_adapter
 
         # In-memory last-known-quote store keyed by "<exchange>:<instrumentId>"
         self._quote_cache: dict[str, dict] = {}
@@ -193,7 +211,8 @@ class MarketEngine:
         if phase == SessionPhase.REGULAR:
             # ── Live acquisition ──────────────────────────────────────────
             raw = await self._fetch_live_quote_stub(instrument_id, exchange)
-            normalised, ok, incident = self._normaliser.normalise_quote(raw, provider="stub")
+            provider_name = raw.get("provider", "angel_one" if self._angel_one else "stub")
+            normalised, ok, incident = self._normaliser.normalise_quote(raw, provider=provider_name)
 
             if not ok:
                 logger.warning(
@@ -210,7 +229,7 @@ class MarketEngine:
 
             # Attach session + provenance
             normalised["marketStatus"] = phase.value
-            normalised["provenance"] = _build_provenance(instrument_id, "stub")
+            normalised["provenance"] = _build_provenance(instrument_id, raw.get("provider", "angel_one" if self._angel_one else "stub"))
 
             # Update cache
             self._quote_cache[cache_key] = {
@@ -393,24 +412,75 @@ class MarketEngine:
         return result
 
     # ------------------------------------------------------------------
-    # Provider stubs (replaced by real adapters in Phase 8)
+    # Provider stubs / real provider dispatch (Phase 8 wiring)
     # ------------------------------------------------------------------
 
     async def _fetch_live_quote_stub(
         self, instrument_id: str, exchange: str
     ) -> dict:
-        """Provider stub — returns a minimal raw quote structure.
+        """Fetch live quote — delegates to AngelOneAdapter when configured.
 
-        In production (Phase 8) this is replaced by the Angel One SmartStream
-        or Upstox V3 broker WebSocket feed.
+        When ``self._angel_one`` is set, the real Angel One SmartAPI quote
+        endpoint is called and the response is returned as-is for the
+        normaliser.  When not configured, returns a null-filled dict so the
+        normaliser produces a ``ltp: null`` response (market-closed or
+        unconfigured — never fabricated data).
 
         Args:
-            instrument_id: Instrument identifier.
+            instrument_id: Instrument identifier (symbol or token).
             exchange: Exchange identifier.
 
         Returns:
-            Raw quote dict with the fields that a real provider would supply.
+            Raw quote dict ready for ``Normaliser.normalise_quote()``.
         """
+        if self._angel_one is not None:
+            try:
+                # Attempt a real Angel One SmartAPI quote fetch.
+                # fetch_live_quote returns a list of quotes; take first.
+                raw_quotes = await self._angel_one.fetch_live_quote(
+                    [instrument_id], exchange=exchange
+                )
+                if raw_quotes:
+                    q = raw_quotes[0]
+                    # Normalise keys to what the Normaliser expects
+                    return {
+                        "instrumentId": instrument_id,
+                        "symbol": q.get("tradingSymbol", instrument_id),
+                        "exchange": exchange,
+                        "ltp": q.get("ltp"),
+                        "open": q.get("open"),
+                        "high": q.get("high"),
+                        "low": q.get("low"),
+                        "prevClose": q.get("close"),
+                        "change": q.get("netChange"),
+                        "changePct": q.get("percentChange"),
+                        "volume": q.get("tradeVolume"),
+                        "oi": q.get("openInterest"),
+                        "tradedValue": None,
+                        "totalBuyQty": q.get("totBuyQuan"),
+                        "totalSellQty": q.get("totSellQuan"),
+                        "upperCircuit": q.get("upperCircuit"),
+                        "lowerCircuit": q.get("lowerCircuit"),
+                        "weekHigh52": q.get("52WeekHigh"),
+                        "weekLow52": q.get("52WeekLow"),
+                        "lastTradeTime": None,
+                        "bid": None,
+                        "ask": None,
+                        "marketStatus": "REGULAR",
+                        "provider": "angel_one",
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "market_engine_angel_quote_failed",
+                    component="market_engine",
+                    instrument_id=instrument_id,
+                    error=str(exc),
+                )
+                # Fall through to null-filled stub on provider failure
+                # so a provider failure is never silently converted to
+                # fabricated data (Absolute Rule 2).
+
+        # Stub / fallback — null values, provider="unavailable"
         return {
             "instrumentId": instrument_id,
             "symbol": instrument_id.split(":")[-1] if ":" in instrument_id else instrument_id,
@@ -435,24 +505,44 @@ class MarketEngine:
             "bid": None,
             "ask": None,
             "marketStatus": "REGULAR",
+            "provider": "unavailable",
         }
 
     async def _fetch_option_chain_stub(
         self, underlying: str, expiry: Optional[str], exchange: str
     ) -> tuple[list[dict], Optional[float], Optional[str]]:
-        """Provider stub — returns empty option chain data.
+        """Fetch option chain — delegates to AngelOneAdapter when configured.
 
-        In production this is replaced by the Scrapling/NSE or broker API
-        option chain fetch.
+        When ``self._angel_one`` is set, the real Angel One option chain is
+        fetched.  Otherwise returns empty rows (not fabricated data).
 
         Args:
             underlying: Underlying symbol.
-            expiry: Expiry filter (ISO-8601) or None.
+            expiry: Expiry filter (ISO-8601) or None for nearest expiry.
             exchange: Exchange.
 
         Returns:
             Tuple of (raw_rows, spot_price, resolved_expiry).
         """
+        if self._angel_one is not None:
+            try:
+                chain_data = await self._angel_one.fetch_option_chain(
+                    underlying, expiry=expiry
+                )
+                if chain_data:
+                    raw_rows = chain_data.get("rows", [])
+                    spot = chain_data.get("spot")
+                    resolved_expiry = chain_data.get("expiry", expiry)
+                    return raw_rows, spot, resolved_expiry
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "market_engine_angel_option_chain_failed",
+                    component="market_engine",
+                    underlying=underlying,
+                    error=str(exc),
+                )
+
+        # No adapter or adapter failed — empty rows, not fabricated data
         return [], None, expiry
 
     # ------------------------------------------------------------------

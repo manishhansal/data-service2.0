@@ -175,6 +175,104 @@ def _get_holiday_calendar(request: Request):  # type: ignore[return]
 
 
 # ---------------------------------------------------------------------------
+# GET /v1/india/quotes/batch — batch quote for multiple symbols
+# NOTE: Must be registered BEFORE /india/quotes/{symbol} so FastAPI does not
+#       match the literal path segment "batch" as the {symbol} path parameter.
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/india/quotes/batch",
+    summary="Live quotes for multiple instruments",
+    description=(
+        "Returns live quotes for a comma-separated list of symbols. "
+        "Symbols with no data return null in the corresponding slot. "
+        "Maximum 200 symbols per request."
+    ),
+    response_class=Response,
+)
+async def get_batch_quotes(
+    request: Request,
+    symbols: Annotated[
+        str,
+        Query(description="Comma-separated NSE symbols (e.g. RELIANCE,NIFTY,HDFCBANK)"),
+    ],
+    exchange: Annotated[
+        str,
+        Query(description="Exchange identifier (default: NSE)"),
+    ] = "NSE",
+) -> Response:
+    """Return live quotes for multiple symbols in one call."""
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not symbol_list:
+        return _json_response(
+            _error_envelope("INVALID_PARAMETER", "symbols is required", request_id=_request_id()),
+            status_code=400,
+        )
+    if len(symbol_list) > 200:
+        return _json_response(
+            _error_envelope(
+                "INVALID_PARAMETER",
+                f"Too many symbols: {len(symbol_list)}. Maximum is 200.",
+                request_id=_request_id(),
+            ),
+            status_code=400,
+        )
+
+    import asyncio  # noqa: PLC0415
+    market_engine = _get_market_engine(request)
+
+    async def _quote_one(sym: str) -> Optional[dict]:
+        try:
+            q = await market_engine.get_live_quote(sym, exchange=exchange)
+            # Map to canonical MDQuote shape
+            return {
+                "symbol": sym,
+                "token": None,
+                "exchange": exchange.upper(),
+                "name": q.get("name"),
+                "ltp": q.get("ltp"),
+                "change": q.get("change"),
+                "changePct": q.get("changePct"),
+                "prevClose": q.get("prevClose"),
+                "open": q.get("open"),
+                "high": q.get("high"),
+                "low": q.get("low"),
+                "volume": q.get("volume"),
+                "oi": q.get("oi"),
+                "weekHigh52": q.get("weekHigh52"),
+                "weekLow52": q.get("weekLow52"),
+                "upperCircuit": q.get("upperCircuit"),
+                "lowerCircuit": q.get("lowerCircuit"),
+                "totalBuyQty": q.get("totalBuyQty"),
+                "totalSellQty": q.get("totalSellQty"),
+                "lastTradeTime": q.get("lastTradeTime"),
+                "provider": q.get("provenance", {}).get("source") or "angel_one",
+                "fetchedAt": _utc_iso_now(),
+                "marketStatus": q.get("marketStatus"),
+            }
+        except Exception:  # noqa: BLE001
+            return None
+
+    results = await asyncio.gather(*[_quote_one(s) for s in symbol_list])
+    quotes = list(results)
+
+    market_status = "UNKNOWN"
+    for q in quotes:
+        if q and q.get("marketStatus"):
+            market_status = q["marketStatus"]
+            break
+
+    return _json_response(
+        _success_envelope(
+            {"quotes": quotes, "count": len(quotes)},
+            data_source_type="LIVE" if market_status == SessionPhase.REGULAR.value else "CACHED",
+            market_status=market_status,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /v1/india/quotes/{symbol}
 # ---------------------------------------------------------------------------
 
