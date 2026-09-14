@@ -269,7 +269,11 @@ def _register_routers(app: FastAPI) -> None:
     _include_protected("src.api.providers", prefix="/v1", tags=["Providers"])
     _include_protected("src.api.lineage", prefix="/v1", tags=["Lineage"])
     _include_protected("src.api.provenance", prefix="/v1", tags=["Provenance"])
-    _include_protected("src.api.streaming", prefix="/v1", tags=["Streaming"])
+    # src.api.streaming is intentionally NOT wrapped with _include_protected.
+    # FastAPI's APIKeyHeader dependency expects an HTTP Request object, but
+    # WebSocket connections inject a WebSocket — causing a TypeError at
+    # connection time.  The streaming module handles auth inline instead.
+    _try_include(app, "src.api.streaming", prefix="/v1", tags=["Streaming"])
     _include_protected("src.api.internal", prefix="/v1", tags=["Internal"])
     _include_protected("src.api.analytics", prefix="/v1", tags=["Analytics"])
     _include_protected("src.api.replay", prefix="/v1", tags=["Replay"])
