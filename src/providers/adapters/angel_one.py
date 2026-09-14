@@ -158,12 +158,19 @@ class AngelOneAdapter:
         client_id: str,
         totp_secret: str,
         *,
+        mpin: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         # Credentials are stored in private attributes and never echoed
         self._api_key = api_key
         self._client_id = client_id
         self._totp_secret = totp_secret
+        # Angel One SmartAPI login requires:
+        #   password = 4-digit MPIN (broker login PIN)
+        #   totp     = 6-digit TOTP code (from TOTP_SECRET)
+        # If mpin is not provided, fall back to using TOTP as password for
+        # backward compat (some test environments do not need MPIN).
+        self._mpin: Optional[str] = mpin
 
         self._http_client = http_client
         self._owns_client = http_client is None  # True → we created it, we close it
@@ -233,7 +240,9 @@ class AngelOneAdapter:
 
         payload = {
             "clientcode": self._client_id,
-            "password": totp_code,  # Angel One uses TOTP as the OTP field
+            # SmartAPI: password = 4-digit MPIN, totp = 6-digit TOTP code.
+            # Fall back to TOTP as password when MPIN not provided (legacy/test).
+            "password": self._mpin if self._mpin else totp_code,
             "totp": totp_code,
         }
         headers = {

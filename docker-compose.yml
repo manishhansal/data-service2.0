@@ -222,6 +222,8 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: data-service-postgres
     restart: unless-stopped
+    ports:
+      - "5444:5432"
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-mds}"
       POSTGRES_USER: "${POSTGRES_USER:-mds_user}"

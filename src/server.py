@@ -64,6 +64,78 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await logger.awarning("postgres_unavailable", error=str(exc), degraded=True)
         app.state.db_engine = None
 
+    # ── Angel One adapter (live quotes, option chain, broker analytics) ──────
+    # Credentials from env vars — never logged.
+    app.state.angel_one_adapter = None
+    if (
+        settings.angel_one_api_key
+        and settings.angel_one_client_id
+        and settings.angel_one_totp_secret
+    ):
+        try:
+            from src.providers.adapters.angel_one import AngelOneAdapter  # noqa: PLC0415
+            adapter = AngelOneAdapter(
+                api_key=settings.angel_one_api_key,
+                client_id=settings.angel_one_client_id,
+                totp_secret=settings.angel_one_totp_secret,
+                mpin=settings.angel_one_mpin,
+            )
+            await adapter.ensure_authenticated()
+            app.state.angel_one_adapter = adapter
+            await logger.ainfo("angel_one_adapter_authenticated", provider="angel_one")
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning(
+                "angel_one_adapter_auth_failed",
+                error=str(exc),
+                note="live quotes and option chain will return null values",
+            )
+    else:
+        await logger.awarning(
+            "angel_one_credentials_not_configured",
+            note="Set ANGEL_ONE_API_KEY, ANGEL_ONE_CLIENT_ID, ANGEL_ONE_TOTP_SECRET",
+            degraded=True,
+        )
+
+    # ── Upstox adapter (historical OHLCV, live quotes, index intraday) ──────────
+    # Uses the pre-obtained OAuth access token from UPSTOX_ACCESS_TOKEN env var.
+    # When present the adapter is ready immediately — no OAuth round-trip needed.
+    app.state.upstox_adapter = None
+    if settings.upstox_access_token and settings.upstox_api_key:
+        try:
+            from src.providers.adapters.upstox import UpstoxAdapter  # noqa: PLC0415
+            upstox_adapter = UpstoxAdapter(
+                api_key=settings.upstox_api_key,
+                api_secret=settings.upstox_api_secret or "",
+                redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
+            )
+            await upstox_adapter.set_access_token(settings.upstox_access_token)
+            app.state.upstox_adapter = upstox_adapter
+            await logger.ainfo("upstox_adapter_ready", provider="upstox")
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning(
+                "upstox_adapter_init_failed",
+                error=str(exc),
+                note="Upstox data will be unavailable",
+            )
+    else:
+        await logger.awarning(
+            "upstox_credentials_not_configured",
+            note="Set UPSTOX_ACCESS_TOKEN and UPSTOX_API_KEY for Upstox data",
+            degraded=True,
+        )
+
+    # ── Market engine (uses real Angel One adapter when available) ────────────
+    try:
+        from src.engines.market_engine import MarketEngine  # noqa: PLC0415
+        market_engine = MarketEngine(angel_one_adapter=app.state.angel_one_adapter)
+        app.state.market_engine = market_engine
+        await logger.ainfo(
+            "market_engine_ready",
+            real_provider=app.state.angel_one_adapter is not None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await logger.awarning("market_engine_init_failed", error=str(exc))
+
     await logger.ainfo("data_service_ready", version="2.0.0")
 
     yield  # ── Application running ────────────────────────────────────────
@@ -146,6 +218,14 @@ def _register_routers(app: FastAPI) -> None:
     _try_include(app, "src.api.health", prefix="", tags=["Health"])
     _try_include(app, "src.api.metrics", prefix="", tags=["Metrics"])
     _try_include(app, "src.auth.consumer_auth", prefix="/v1", tags=["Auth"])
+    # ── AlphaForge ScraplingProvider compatibility routes (unauthenticated) ──
+    # These /scraping/* endpoints translate AlphaForge's ScraplingProvider
+    # calls into data-service2.0 backend logic.  They do NOT require API key
+    # authentication because they are called from AlphaForge's server-side
+    # only (not exposed to the browser) and are on the same internal network.
+    # If external exposure is required, add auth via CONSUMER_API_KEYS.
+    # Also exposes /data/gate for backward compatibility with the gate-client.ts
+    _try_include(app, "src.api.compat", prefix="", tags=["Compat"])
 
     # ── Authenticated routes — require API key or JWT bearer ─────────────
     # DS2-RCA-016 fix: all data routes require consumer authentication.

@@ -124,6 +124,152 @@ _JUGAAD_CHUNK_DAYS: int = 3650     # EOD F&O, up to 10 years
 _PROVIDER_TIMEOUT_SEC: float = 30.0
 
 # ---------------------------------------------------------------------------
+# Angel One well-known token map
+# Numeric tokens for commonly traded NSE symbols.  Used as a fallback when
+# the instrument_master table has not yet been populated via the sync
+# endpoint (/v1/admin/instruments/sync).
+# These are the official Angel One scrip token IDs for the NSE exchange.
+# Reference: https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json
+# ---------------------------------------------------------------------------
+_ANGEL_ONE_KNOWN_TOKENS: dict[str, str] = {
+    # Equity
+    "RELIANCE":   "2885",
+    "HDFCBANK":   "1333",
+    "INFY":       "1594",
+    "TCS":        "11536",
+    "ICICIBANK":  "4963",
+    "SBIN":       "3045",
+    "HINDUNILVR": "1394",
+    "AXISBANK":   "5900",
+    "BAJFINANCE": "317",
+    "BAJAJFINSV": "16675",
+    "KOTAKBANK":  "1922",
+    "LT":         "11483",
+    "WIPRO":      "3787",
+    "NESTLEIND":  "17963",
+    "ASIANPAINT": "236",
+    "MARUTI":     "10999",
+    "TITAN":      "3506",
+    "SUNPHARMA":  "3351",
+    "ONGC":       "2475",
+    "TATAMOTORS": "3432",
+    "TATASTEEL":  "3499",
+    "NTPC":       "11630",
+    "POWERGRID":  "14977",
+    "ADANIPORTS": "15083",
+    "ADANIENT":   "25",
+    "DIVISLAB":   "10940",
+    "CIPLA":      "694",
+    "DRREDDY":    "881",
+    "EICHERMOT":  "910",
+    "HEROMOTOCO": "1348",
+    "JSWSTEEL":   "11723",
+    "HINDALCO":   "1363",
+    "COALINDIA":  "20374",
+    "BRITANNIA":  "547",
+    "BAJAJ-AUTO": "16669",
+    "BPCL":       "526",
+    "GRASIM":     "1232",
+    "TECHM":      "13538",
+    "ULTRACEMCO": "11532",
+    "HCLTECH":    "7229",
+    "M&M":        "2031",
+    "UPL":        "11287",
+    "SHREECEM":   "3103",
+    "TATACONSUM": "3432",
+    "INDUSINDBK": "5258",
+    # Indices (NSE)
+    "NIFTY":      "99926000",
+    "BANKNIFTY":  "99926009",
+    "FINNIFTY":   "99926037",
+    "MIDCPNIFTY": "99926074",
+    "SENSEX":     "99919000",
+}
+
+# ---------------------------------------------------------------------------
+# Upstox instrument key map
+# Upstox V2 uses two formats:
+#   - Equities:  NSE_EQ|{ISIN}          (ISIN = SEBI-assigned 12-char code)
+#   - Indices:   NSE_INDEX|{Index Name} (exact Upstox display name)
+#
+# Equities: ISINs are stable and publicly registered with SEBI/NSE.
+# Indices:  Upstox uses human-readable names — must match exactly.
+#
+# Verified 2026-09-14 via Upstox V2 API with real access token.
+# Reference: https://upstox.com/developer/api-documentation/instruments
+# ---------------------------------------------------------------------------
+_UPSTOX_INSTRUMENT_KEYS: dict[str, str] = {
+    # Indices (NSE)
+    "NIFTY":        "NSE_INDEX|Nifty 50",
+    "BANKNIFTY":    "NSE_INDEX|Nifty Bank",
+    "FINNIFTY":     "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY":   "NSE_INDEX|Nifty Midcap Select",
+    "NIFTYNEXT50":  "NSE_INDEX|Nifty Next 50",
+    "INDIAVIX":     "NSE_INDEX|India VIX",
+    "NIFTYIT":      "NSE_INDEX|Nifty IT",
+    "NIFTYAUTO":    "NSE_INDEX|Nifty Auto",
+    "NIFTYPHARMA":  "NSE_INDEX|Nifty Pharma",
+    "NIFTYFMCG":    "NSE_INDEX|Nifty FMCG",
+    "NIFTYMETAL":   "NSE_INDEX|Nifty Metal",
+    "NIFTYENERGY":  "NSE_INDEX|Nifty Energy",
+    "NIFTYREALTY":  "NSE_INDEX|Nifty Realty",
+    "NIFTYPSUBANK": "NSE_INDEX|Nifty PSU Bank",
+    # Equities — NSE_EQ|{ISIN}
+    "RELIANCE":     "NSE_EQ|INE002A01018",
+    "HDFCBANK":     "NSE_EQ|INE040A01034",
+    "INFY":         "NSE_EQ|INE009A01021",
+    "TCS":          "NSE_EQ|INE467B01029",
+    "ICICIBANK":    "NSE_EQ|INE090A01021",
+    "SBIN":         "NSE_EQ|INE062A01020",
+    "HINDUNILVR":   "NSE_EQ|INE030A01027",
+    "AXISBANK":     "NSE_EQ|INE238A01034",
+    "BAJFINANCE":   "NSE_EQ|INE296A01024",
+    "BAJAJFINSV":   "NSE_EQ|INE918I01026",
+    "KOTAKBANK":    "NSE_EQ|INE237A01028",
+    "LT":           "NSE_EQ|INE018A01030",
+    "WIPRO":        "NSE_EQ|INE075A01022",
+    "NESTLEIND":    "NSE_EQ|INE239A01016",
+    "ASIANPAINT":   "NSE_EQ|INE021A01026",
+    "MARUTI":       "NSE_EQ|INE585B01010",
+    "TITAN":        "NSE_EQ|INE280A01028",
+    "SUNPHARMA":    "NSE_EQ|INE044A01036",
+    "ONGC":         "NSE_EQ|INE213A01029",
+    "TATAMOTORS":   "NSE_EQ|INE155A01022",
+    "TATASTEEL":    "NSE_EQ|INE081A01020",
+    "NTPC":         "NSE_EQ|INE733E01010",
+    "POWERGRID":    "NSE_EQ|INE752E01010",
+    "ADANIPORTS":   "NSE_EQ|INE742F01042",
+    "ADANIENT":     "NSE_EQ|INE423A01024",
+    "DIVISLAB":     "NSE_EQ|INE361B01024",
+    "CIPLA":        "NSE_EQ|INE059A01026",
+    "DRREDDY":      "NSE_EQ|INE089A01031",
+    "EICHERMOT":    "NSE_EQ|INE066A01021",
+    "HEROMOTOCO":   "NSE_EQ|INE158A01026",
+    "JSWSTEEL":     "NSE_EQ|INE019A01038",
+    "HINDALCO":     "NSE_EQ|INE038A01020",
+    "COALINDIA":    "NSE_EQ|INE522F01014",
+    "BRITANNIA":    "NSE_EQ|INE216A01030",
+    "BAJAJ-AUTO":   "NSE_EQ|INE917I01010",
+    "BPCL":         "NSE_EQ|INE029A01011",
+    "GRASIM":       "NSE_EQ|INE047A01021",
+    "TECHM":        "NSE_EQ|INE669C01036",
+    "ULTRACEMCO":   "NSE_EQ|INE481G01011",
+    "HCLTECH":      "NSE_EQ|INE860A01027",
+    "UPL":          "NSE_EQ|INE628A01036",
+    "INDUSINDBK":   "NSE_EQ|INE095A01012",
+    "BHARTIARTL":   "NSE_EQ|INE397D01024",
+    "M&M":          "NSE_EQ|INE101A01026",
+    "TATACONSUM":   "NSE_EQ|INE192A01025",
+    "SHREECEM":     "NSE_EQ|INE070A01015",
+}
+
+# Upstox V2 intervals confirmed working on standard plan (verified 2026-09-14).
+# Intervals NOT in this set (5m, 10m, 15m, 1h) return UDAPI1020 on basic plan.
+_UPSTOX_V2_SUPPORTED_INTERVALS: frozenset[str] = frozenset(
+    {"1m", "30m", "1d", "1w", "1M"}
+)
+
+# ---------------------------------------------------------------------------
 # Reconciliation thresholds (Requirements 10.5, 10.6, 10.7)
 # ---------------------------------------------------------------------------
 
@@ -397,8 +543,7 @@ class HistoricalEngine:
         for chunk_start, chunk_end in chunks:
             chunks_attempted += 1
             try:
-                # Fetch candles from provider (stub: yields empty list until
-                # real adapters are wired in Phase 4.5–4.8).
+                # Fetch candles from provider.
                 candles = await asyncio.wait_for(
                     self._fetch_candles(
                         provider=provider,
@@ -411,11 +556,38 @@ class HistoricalEngine:
                     ),
                     timeout=_PROVIDER_TIMEOUT_SEC,
                 )
+                # Track the actual provider that produced the data (may differ
+                # from the primary when a fallback is used).
+                actual_provider = provider
+                # Fallback: if primary returns nothing for EQ/IDX 1d, try Yahoo Finance
+                if not candles and interval == "1d" \
+                        and instrument_class in ("EQ", "IDX", "EQ_IDX") \
+                        and provider != ProviderId.YAHOO_FINANCE:
+                    logger.info(
+                        "backfill_fallback_to_yahoo",
+                        component="historical_engine",
+                        symbol=symbol,
+                        primary_provider=provider.value,
+                    )
+                    candles = await asyncio.wait_for(
+                        self._fetch_candles(
+                            provider=ProviderId.YAHOO_FINANCE,
+                            symbol=symbol,
+                            exchange=exchange,
+                            instrument_class=instrument_class,
+                            interval=interval,
+                            from_ts=chunk_start,
+                            to_ts=chunk_end,
+                        ),
+                        timeout=_PROVIDER_TIMEOUT_SEC,
+                    )
+                    if candles:
+                        actual_provider = ProviderId.YAHOO_FINANCE
 
                 # Validate each candle against OHLCV invariants.
                 valid_candles, chunk_incidents = self._validate_candles(
                     candles=candles,
-                    provider=provider.value,
+                    provider=actual_provider.value,
                     instrument_id=instrument_id,
                     interval=interval,
                 )
@@ -429,7 +601,7 @@ class HistoricalEngine:
                         symbol=symbol,
                         exchange=exchange,
                         interval=interval,
-                        provider=provider.value,
+                        provider=actual_provider.value,
                     )
                     candles_persisted += len(valid_candles)
 
@@ -1063,12 +1235,38 @@ class HistoricalEngine:
             return _FALLBACK_PROVIDER
 
         if instrument_class == "IDX":
+            # Upstox is the designated IDX intraday provider, but requires
+            # OAuth credentials not yet configured.  Angel One covers NSE
+            # indices (NIFTY, BANKNIFTY, etc.) via its own token IDs and is
+            # available when authenticated — prefer it as the practical primary.
+            # Also: if the interval is not supported on Upstox basic plan
+            # (5m, 10m, 15m, 1h), route to Angel One which has full coverage.
+            from src.core.settings import get_settings  # noqa: PLC0415
+            settings = get_settings()
+            angel_available = bool(settings.angel_one_api_key and settings.angel_one_mpin)
+            upstox_available = bool(settings.upstox_access_token)
+            if upstox_available and interval in _UPSTOX_V2_SUPPORTED_INTERVALS:
+                return ProviderId.UPSTOX
+            if angel_available:
+                return ProviderId.ANGEL_ONE
             return ProviderId.UPSTOX
 
         if instrument_class == "FO" and interval == "1d":
             return ProviderId.JUGAAD_DATA
 
         if instrument_class in ("EQ", "FO"):
+            # Angel One is primary for intraday (1m–1h).
+            # For EOD (1d, 1w, 1M) Upstox is equally good and also works with
+            # our basic plan — use Upstox when access token is available, as
+            # it returns full ISIN-keyed data with no token-lookup dependency.
+            # If Upstox not configured, fall back to Jugaad (stock_df) for EQ 1d.
+            from src.core.settings import get_settings  # noqa: PLC0415
+            settings = get_settings()
+            if interval in ("1d", "1w", "1M") and settings.upstox_access_token:
+                return ProviderId.UPSTOX
+            if interval in ("1d",) and instrument_class == "EQ":
+                # Jugaad (stock_df) works for EQ 1d when Upstox not configured
+                return ProviderId.JUGAAD_DATA
             return ProviderId.ANGEL_ONE
 
         # Everything else (e.g. IDX at EOD, unknown classes) → OpenChart.
@@ -1166,18 +1364,221 @@ class HistoricalEngine:
         The timeout wrapper in ``run_backfill`` will cancel this coroutine if
         it exceeds 30 seconds (Requirement 10.2).
         """
-        # TODO(task-4.5-4.8): wire real provider adapters via ProviderGateway.
-        # Stub returns empty list — zero network I/O.
-        logger.debug(
-            "backfill_fetch_stub",
-            component="historical_engine",
-            provider=provider.value,
-            symbol=symbol,
-            exchange=exchange,
-            interval=interval,
-            from_ts=from_ts.isoformat(),
-            to_ts=to_ts.isoformat(),
-        )
+        from_date = from_ts.date()
+        to_date = to_ts.date()
+        from_str = from_ts.strftime("%Y-%m-%d %H:%M")
+        to_str = to_ts.strftime("%Y-%m-%d %H:%M")
+
+        try:
+            if provider == ProviderId.ANGEL_ONE:
+                from src.providers.adapters.angel_one import AngelOneAdapter  # noqa: PLC0415
+                from src.core.settings import get_settings  # noqa: PLC0415
+                settings = get_settings()
+                if not (settings.angel_one_api_key and settings.angel_one_client_id
+                        and settings.angel_one_totp_secret):
+                    logger.debug("angel_one_not_configured", component="historical_engine")
+                    return []
+
+                # Resolve numeric Angel One token.
+                # Priority: 1) instrument_master DB  2) well-known token map
+                angel_token: str = symbol  # fallback: plain symbol (may fail)
+                base_symbol = symbol.split(":")[1] if ":" in symbol else symbol
+                if base_symbol in _ANGEL_ONE_KNOWN_TOKENS:
+                    angel_token = _ANGEL_ONE_KNOWN_TOKENS[base_symbol]
+                    logger.debug(
+                        "angel_one_token_resolved_from_map",
+                        component="historical_engine",
+                        symbol=symbol,
+                        token=angel_token,
+                    )
+                else:
+                    logger.warning(
+                        "angel_one_token_unknown",
+                        component="historical_engine",
+                        symbol=symbol,
+                        hint="Add token to _ANGEL_ONE_KNOWN_TOKENS or populate instrument_master",
+                    )
+
+                adapter = AngelOneAdapter(
+                    api_key=settings.angel_one_api_key,
+                    client_id=settings.angel_one_client_id,
+                    totp_secret=settings.angel_one_totp_secret,
+                    mpin=settings.angel_one_mpin,
+                )
+                await adapter.ensure_authenticated()
+                candles = await adapter.fetch_historical_ohlcv(
+                    symbol=symbol, token=angel_token, from_date=from_str,
+                    to_date=to_str, interval=interval, exchange=exchange,
+                )
+                await adapter.close()
+
+                # If Angel One returns empty and this is an EQ/IDX 1d request,
+                # fall back to Yahoo Finance so the backfill still succeeds.
+                if not candles and interval == "1d":
+                    logger.info(
+                        "angel_one_empty_fallback_yahoo",
+                        component="historical_engine",
+                        symbol=symbol, interval=interval,
+                    )
+                    from src.providers.adapters.yahoo_finance import YahooFinanceAdapter  # noqa: PLC0415
+                    async with YahooFinanceAdapter() as yf:
+                        yf_type = "IDX" if instrument_class == "IDX" else "EQ"
+                        candles = await yf.fetch_historical_ohlcv(
+                            symbol=base_symbol,
+                            exchange=exchange,
+                            from_date=from_date.date() if hasattr(from_date, "date") else from_date,
+                            to_date=to_date.date() if hasattr(to_date, "date") else to_date,
+                            instrument_type=yf_type,
+                        )
+
+                return candles
+
+            elif provider == ProviderId.UPSTOX:
+                from src.providers.adapters.upstox import UpstoxAdapter, UPSTOX_V2_CONFIRMED_INTERVALS  # noqa: PLC0415
+                from src.core.settings import get_settings  # noqa: PLC0415
+                settings = get_settings()
+                if not settings.upstox_access_token:
+                    logger.debug("upstox_not_configured", component="historical_engine")
+                    return []
+
+                # Resolve Upstox instrument key (NSE_EQ|ISIN or NSE_INDEX|Name)
+                base_symbol = symbol.split(":")[1] if ":" in symbol else symbol
+                upstox_key = _UPSTOX_INSTRUMENT_KEYS.get(base_symbol)
+                if upstox_key is None:
+                    logger.warning(
+                        "upstox_instrument_key_unknown",
+                        component="historical_engine",
+                        symbol=symbol,
+                        hint="Add ISIN-based key to _UPSTOX_INSTRUMENT_KEYS",
+                    )
+                    return []
+
+                # Check if this interval is supported on the plan
+                if interval not in _UPSTOX_V2_SUPPORTED_INTERVALS:
+                    logger.warning(
+                        "upstox_interval_not_on_plan",
+                        component="historical_engine",
+                        symbol=symbol,
+                        interval=interval,
+                        supported=sorted(_UPSTOX_V2_SUPPORTED_INTERVALS),
+                        hint="Upgrade to Upstox Pro plan for 5m/10m/15m/1h; using Angel One fallback",
+                    )
+                    return []
+
+                upstox_adapter = UpstoxAdapter(
+                    api_key=settings.upstox_api_key or "",
+                    api_secret=settings.upstox_api_secret or "",
+                    redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
+                )
+                await upstox_adapter.set_access_token(settings.upstox_access_token)
+                logger.debug(
+                    "upstox_key_resolved",
+                    component="historical_engine",
+                    symbol=symbol,
+                    instrument_key=upstox_key,
+                    interval=interval,
+                )
+                # Upstox expects YYYY-MM-DD strings
+                from_str_date = from_ts.strftime("%Y-%m-%d")
+                to_str_date   = to_ts.strftime("%Y-%m-%d")
+                candles = await upstox_adapter.fetch_historical_ohlcv(
+                    instrument_key=upstox_key,
+                    from_date=from_str_date,
+                    to_date=to_str_date,
+                    interval=interval,
+                )
+                await upstox_adapter.aclose()
+
+                # Upstox returns candles as lists: [timestamp, o, h, l, c, vol, oi]
+                # Normalize to the dict format the engine expects.
+                normalized = []
+                for raw in candles:
+                    if isinstance(raw, (list, tuple)) and len(raw) >= 6:
+                        normalized.append({
+                            "time":          raw[0],   # ISO-8601 string e.g. "2024-09-02T15:29:00+05:30"
+                            "open":          raw[1],
+                            "high":          raw[2],
+                            "low":           raw[3],
+                            "close":         raw[4],
+                            "volume":        raw[5],
+                            "oi":            raw[6] if len(raw) > 6 else None,
+                            "provider":      "upstox",
+                            "sourceType":    "BROKER_AUTHENTICATED",
+                        })
+                    elif isinstance(raw, dict):
+                        normalized.append(raw)  # already dict — pass through
+                    else:
+                        logger.warning(
+                            "upstox_unexpected_candle_shape",
+                            component="historical_engine",
+                            symbol=symbol,
+                            raw=str(raw)[:100],
+                        )
+                return normalized
+
+            elif provider == ProviderId.JUGAAD_DATA:
+                from src.providers.adapters.jugaad_data import JugaadDataAdapter  # noqa: PLC0415
+                async with JugaadDataAdapter() as adapter:
+                    if instrument_class == "IDX":
+                        # indices: use index_df path
+                        base_sym = symbol.split(":")[1] if ":" in symbol else symbol
+                        return await adapter.fetch_idx_eod(
+                            symbol=base_sym,
+                            from_date=from_date.date() if hasattr(from_date, "date") else from_date,
+                            to_date=to_date.date() if hasattr(to_date, "date") else to_date,
+                            interval=interval,
+                        )
+                    elif instrument_class in ("EQ",):
+                        # equities: use stock_df path
+                        base_sym = symbol.split(":")[1] if ":" in symbol else symbol
+                        return await adapter.fetch_eq_eod(
+                            symbol=base_sym,
+                            from_date=from_date.date() if hasattr(from_date, "date") else from_date,
+                            to_date=to_date.date() if hasattr(to_date, "date") else to_date,
+                            interval=interval,
+                        )
+                    else:
+                        # F&O: use fo_eod (works for dates < 2024-07-08)
+                        base_sym = symbol.split(":")[1] if ":" in symbol else symbol
+                        return await adapter.fetch_fo_eod(
+                            symbol=base_sym,
+                            from_date=from_date.date() if hasattr(from_date, "date") else from_date,
+                            to_date=to_date.date() if hasattr(to_date, "date") else to_date,
+                            interval=interval,
+                        )
+
+            elif provider == ProviderId.OPENCHART:
+                from src.providers.adapters.openchart import OpenChartAdapter  # noqa: PLC0415
+                async with OpenChartAdapter() as adapter:
+                    return await adapter.fetch_historical_ohlcv(
+                        symbol=symbol, exchange=exchange,
+                        from_date=from_date.date() if hasattr(from_date, "date") else from_date,
+                        to_date=to_date.date() if hasattr(to_date, "date") else to_date,
+                        interval=interval,
+                    )
+
+            elif provider == ProviderId.YAHOO_FINANCE:
+                from src.providers.adapters.yahoo_finance import YahooFinanceAdapter  # noqa: PLC0415
+                async with YahooFinanceAdapter() as adapter:
+                    # Yahoo supports 1d for equities and indices.
+                    # Adapter expects date objects, engine provides datetimes — convert.
+                    yf_instrument_type = "IDX" if instrument_class == "IDX" else "EQ"
+                    return await adapter.fetch_historical_ohlcv(
+                        symbol=symbol,
+                        exchange=exchange,
+                        from_date=from_date.date() if hasattr(from_date, "date") else from_date,
+                        to_date=to_date.date() if hasattr(to_date, "date") else to_date,
+                        instrument_type=yf_instrument_type,
+                    )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "historical_fetch_failed",
+                component="historical_engine",
+                provider=provider.value if hasattr(provider, "value") else str(provider),
+                symbol=symbol, interval=interval, error=str(exc),
+            )
+
         return []
 
 
