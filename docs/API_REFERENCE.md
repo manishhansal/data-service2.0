@@ -1,7 +1,7 @@
 # DATA-SERVICE 2.0 — API Reference
 **Version:** 2.0.0  
-**Base URL:** `http://localhost:8201` (local dev) · `https://<host>` (production)  
-**Updated:** 2026-09-14
+**Base URL:** `http://localhost:8200` (local dev) · `https://<host>` (production)  
+**Updated:** 2026-09-15
 
 ---
 
