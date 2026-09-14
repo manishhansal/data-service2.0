@@ -327,7 +327,7 @@ async def get_crypto_ohlcv(
 
     # ── Fetch from Binance ─────────────────────────────────────────────────
     client = _get_binance_client(request)
-    symbol_upper = symbol.upper()
+    symbol_upper = _normalize_binance_symbol(symbol)
 
     try:
         raw_candles = await client.get_klines(
@@ -378,6 +378,39 @@ async def get_crypto_ohlcv(
 
 
 # ---------------------------------------------------------------------------
+# Symbol normalisation helper
+# ---------------------------------------------------------------------------
+
+# Known Binance quote currencies in priority order.  When a caller supplies a
+# bare base asset (e.g. "BTC" or "sol") we append the default quote currency
+# so that the Binance REST API receives a valid trading-pair symbol.
+_KNOWN_QUOTE_CURRENCIES: tuple[str, ...] = (
+    "USDT", "USDC", "BUSD", "BTC", "ETH", "BNB",
+)
+_DEFAULT_QUOTE_CURRENCY = "USDT"
+
+
+def _normalize_binance_symbol(symbol: str) -> str:
+    """Return a valid Binance trading-pair symbol from *symbol*.
+
+    If *symbol* already ends with a known quote currency it is returned as-is
+    (uppercased).  Otherwise ``USDT`` is appended so that a caller passing
+    ``"BTC"`` or ``"sol"`` gets ``"BTCUSDT"``/``"SOLUSDT"`` respectively.
+
+    Examples::
+
+        _normalize_binance_symbol("BTC")     -> "BTCUSDT"
+        _normalize_binance_symbol("btc")     -> "BTCUSDT"
+        _normalize_binance_symbol("BTCUSDT") -> "BTCUSDT"
+        _normalize_binance_symbol("ETHBTC")  -> "ETHBTC"
+    """
+    upper = symbol.upper()
+    if any(upper.endswith(q) for q in _KNOWN_QUOTE_CURRENCIES):
+        return upper
+    return upper + _DEFAULT_QUOTE_CURRENCY
+
+
+# ---------------------------------------------------------------------------
 # GET /v1/crypto/{symbol}/ticker
 # ---------------------------------------------------------------------------
 
@@ -404,7 +437,7 @@ async def get_crypto_ticker(
     """
     req_id = _request_id()
     client = _get_binance_client(request)
-    symbol_upper = symbol.upper()
+    symbol_upper = _normalize_binance_symbol(symbol)
 
     try:
         ticker = await client.get_ticker_price(symbol_upper)
@@ -457,7 +490,7 @@ async def get_crypto_stats(
     """
     req_id = _request_id()
     client = _get_binance_client(request)
-    symbol_upper = symbol.upper()
+    symbol_upper = _normalize_binance_symbol(symbol)
 
     try:
         stats = await client.get_24hr_stats(symbol_upper)
