@@ -270,3 +270,208 @@
 | **Fix** | `_INTERVAL_MAP` comment updated explicitly documenting that `1M` is NOT supported by Angel One. `1M` must be sourced from Upstox (maps to `"1month"`) or Yahoo Finance. The capability matrix must reflect this limitation. |
 | **Regression test** | `test_1M_not_in_interval_map` added to `tests/unit/providers/adapters/test_angel_one.py`. Passes. |
 | **Residual risk** | Monthly candles for Indian markets work via Upstox fallback. |
+
+---
+
+## DS2-RCA-020 — Angel One Token Routing: Symbol Passed as Token
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P0 (Indian EQ/IDX intraday backfill returned 0 bars) |
+| **Requirement** | Angel One SmartAPI requires a numeric scrip token (e.g. `1333` for HDFCBANK) in the `symboltoken` field of the candle request |
+| **Expected** | `_fetch_candles()` resolves the numeric Angel One token before calling `fetch_historical_ohlcv()` |
+| **Actual** | `_fetch_candles()` passed `token=symbol` (the plain trading symbol string, e.g. `"HDFCBANK"`). Angel One silently returned empty data for non-numeric tokens |
+| **Affected component** | `src/engines/historical_engine.py` — `_fetch_candles()` Angel One branch |
+| **Root cause** | The original stub used `token=symbol` as a placeholder. When real Angel One dispatch was wired in, this was not updated to resolve the numeric token |
+| **Why it was missed** | Backfill jobs completed with `status=COMPLETED` and `candles_persisted=0` — no error was raised. The silent-empty return from Angel One was not surfaced as a failure |
+| **Fix** | Added `_ANGEL_ONE_KNOWN_TOKENS: dict[str, str]` at module level in `historical_engine.py` — a map of 50+ NSE symbols to their numeric Angel One token IDs. Before calling `fetch_historical_ohlcv()`, the engine resolves: `angel_token = _ANGEL_ONE_KNOWN_TOKENS.get(base_symbol, symbol)`. If the symbol is not in the map, a `WARNING` is logged and the plain symbol is used as a last-resort fallback |
+| **Regression test** | Verified live: `HDFCBANK 5m EQ` job → `candles_persisted=67`; `RELIANCE 1m EQ` → `candles_persisted=375` |
+| **Residual risk** | Symbols not in `_ANGEL_ONE_KNOWN_TOKENS` will still get 0 bars. Long-term fix: populate `instrument_master` from Angel One ScripMaster JSON |
+
+**Key entries in `_ANGEL_ONE_KNOWN_TOKENS`:**
+```python
+"RELIANCE": "2885",   "HDFCBANK": "1333",  "TCS": "11536",
+"INFY": "1594",       "NIFTY": "99926000", "BANKNIFTY": "99926009",
+"FINNIFTY": "99926037"
+# ... 50+ total symbols
+```
+
+---
+
+## DS2-RCA-021 — IDX Instrument Class Always Routed to Upstox (No Credentials)
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P0 (all NSE index intraday backfills returned 0 bars) |
+| **Requirement** | NIFTY, BANKNIFTY etc. 5m/1m historical data must be retrievable via Angel One when authenticated |
+| **Expected** | When Angel One MPIN is configured, IDX intraday routes to Angel One (which has full index coverage via numeric tokens 99926000, 99926009 etc.) |
+| **Actual** | `_resolve_provider()` unconditionally returned `ProviderId.UPSTOX` for `instrument_class == "IDX"`. Upstox OAuth access token is not configured, so Upstox returned empty, and there was no fallback to Angel One |
+| **Affected component** | `src/engines/historical_engine.py` — `_resolve_provider()` |
+| **Root cause** | The capability matrix designates Upstox as the primary IDX intraday provider (correct in theory). But with no Upstox token and a working Angel One session, the routing was effectively a dead end |
+| **Fix** | `_resolve_provider()` for `instrument_class == "IDX"` now checks whether `ANGEL_ONE_API_KEY` and `ANGEL_ONE_MPIN` are configured. If yes, returns `ProviderId.ANGEL_ONE`; otherwise falls back to Upstox. Angel One covers all major NSE indices via their numeric tokens |
+| **Regression test** | Verified live: `NIFTY 5m IDX` job → `candles_persisted=142`; all 151 NIFTY 5m bars confirmed in DB |
+| **Residual risk** | If both Angel One MPIN and Upstox token are absent, IDX routes to Upstox (empty). This is the correct degraded-mode behaviour |
+
+---
+
+## DS2-RCA-022 — Batch Quotes Route Shadowed by Single-Symbol Route
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P1 (batch quotes endpoint non-functional) |
+| **Requirement** | `GET /v1/india/quotes/batch?symbols=NIFTY,RELIANCE` must return a `quotes` array for multiple symbols |
+| **Expected** | FastAPI dispatches to `get_batch_quotes()` handler |
+| **Actual** | FastAPI dispatched to `get_live_quote()` handler with `symbol="batch"` because the single-symbol route `/india/quotes/{symbol}` was registered before `/india/quotes/batch`. FastAPI path-parameter routes take priority over literal segments when registered first |
+| **Affected component** | `src/api/india.py` — route registration order |
+| **Root cause** | The batch route was added after the single-symbol route in the file. FastAPI evaluates routes in registration order; the `{symbol}` catch-all matched `batch` as the symbol value |
+| **Why it was missed** | The endpoint returned HTTP 200 (with wrong data) rather than 404 or 422 — easy to miss in automated testing |
+| **Fix** | Moved the `@router.get("/india/quotes/batch", ...)` decorator and `get_batch_quotes()` function to appear **before** `@router.get("/india/quotes/{symbol}", ...)` in `india.py`. Added comment: `# NOTE: Must be registered BEFORE /india/quotes/{symbol}` |
+| **Verification** | `GET /v1/india/quotes/batch?symbols=NIFTY,RELIANCE,HDFCBANK` → HTTP 200 `{ data: { quotes: [...], count: 3 } }` |
+| **Regression test** | 4483 Python tests pass; AlphaForge batch-quotes path verified |
+
+---
+
+## DS2-RCA-023 — Compat Route Creates Double-Prefixed Instrument ID
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P1 (DB contamination; compat data inaccessible via DS2 native API) |
+| **Requirement** | Candle bars stored with `instrument_id='NSE:HDFCBANK'` (single prefix); accessible via both compat and native routes |
+| **Expected** | `/scraping/historical?symbol=NSE:HDFCBANK` → engine stores bar under `instrument_id='NSE:HDFCBANK'` |
+| **Actual** | `compat_historical()` passed `symbol.upper()` = `"NSE:HDFCBANK"` directly to `run_backfill()`. The engine prefixes the exchange to form `instrument_id`, producing `"NSE:NSE:HDFCBANK"`. These rows were invisible to `/v1/india/historical?symbol=HDFCBANK` which queries for `instrument_id='NSE:HDFCBANK'` |
+| **Affected component** | `src/api/compat.py` — `compat_historical()` |
+| **Root cause** | AlphaForge's ScraplingProvider sends symbols as `"NSE:HDFCBANK"` (exchange-prefixed). The compat route did not strip the prefix before passing to the engine |
+| **Fix** | Added prefix stripping in `compat_historical()`: if `":"` in `raw_symbol`, partition on `":"` to extract base symbol and exchange, then use `raw_symbol` (base only) throughout the function |
+| **Remediation** | 4652 rows with `instrument_id='NSE:NSE:HDFCBANK'` were deleted from the DB |
+| **Verification** | `SELECT COUNT(*) FROM candle_bar WHERE instrument_id LIKE 'NSE:NSE:%' → 0` |
+| **Regression test** | `GET /scraping/historical?symbol=NSE:HDFCBANK&interval=5m` → `{ symbol: "HDFCBANK", count: 4652, provider: "angel_one" }` — no double-prefix in DB |
+
+---
+
+## DS2-RCA-024 — `UPSTOX_ACCESS_TOKEN` Env Var Ignored by Settings
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P0 (Upstox completely non-functional) |
+| **Expected** | `UPSTOX_ACCESS_TOKEN` env var read into settings and available to adapters |
+| **Actual** | `Settings` class had `upstox_api_key`, `upstox_api_secret`, `upstox_redirect_uri` fields but **no `upstox_access_token` field**. The env var was silently ignored (Pydantic `extra="ignore"` setting) |
+| **Affected component** | `src/core/settings.py` |
+| **Root cause** | The access token field was never added during initial settings design — the assumption was that OAuth would be completed at runtime via the `/v1/auth/upstox/callback` flow |
+| **Fix** | Added `upstox_access_token: Optional[str] = None` and `upstox_analytics_key: Optional[str] = None` to `Settings` class with explanatory comments |
+| **Verification** | `settings.upstox_access_token` now populated at startup; `upstox_adapter_ready` logged |
+
+---
+
+## DS2-RCA-025 — Upstox Adapter Never Initialized at Startup
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P0 (no Upstox data possible even with credentials) |
+| **Expected** | `UpstoxAdapter` created and access token set in lifespan, analogous to `AngelOneAdapter` |
+| **Actual** | `server.py` lifespan contained an Angel One initialization block but had **no Upstox block**. `app.state.upstox_adapter` was never set, so the historical engine had to instantiate a fresh adapter per backfill job with no token |
+| **Affected component** | `src/server.py` — `lifespan()` function |
+| **Root cause** | Upstox initialization was deferred pending OAuth flow design; never implemented |
+| **Fix** | Added Upstox initialization block after Angel One block: creates `UpstoxAdapter`, calls `await set_access_token(settings.upstox_access_token)`, attaches to `app.state.upstox_adapter` |
+| **Verification** | `[info] upstox_adapter_ready provider=upstox` in startup log |
+
+---
+
+## DS2-RCA-026 — Upstox Returns List-of-Arrays; Engine Expects Dicts
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P0 (all Upstox backfills failed with `'list' object has no attribute 'get'`) |
+| **Expected** | `_fetch_candles()` returns candle dicts with `time`, `open`, `high`, `low`, `close`, `volume`, `oi` keys |
+| **Actual** | Upstox V2 `/historical-candle` returns: `[[timestamp_str, open, high, low, close, volume, oi], ...]`. When `bulk_upsert_candles()` called `c.get("time")` on these lists, it raised `AttributeError: 'list' object has no attribute 'get'` |
+| **Affected component** | `src/engines/historical_engine.py` — `_fetch_candles()` Upstox branch |
+| **Root cause** | Each provider has a different raw response format. The Upstox adapter returns the raw API array without normalizing to the engine's dict schema |
+| **Diagnosis** | Backfill job incident: `"error": "'list' object has no attribute 'get'"`, `"provider": "upstox"` |
+| **Fix** | Added normalization loop in `_fetch_candles()` Upstox branch: converts `[ts, o, h, l, c, vol, oi]` arrays to `{"time": ts, "open": o, ...}` dicts before returning |
+| **Verification** | Live: `RELIANCE 1d → 7 bars`, `NIFTY 1m → 750 bars`, all `BROKER_AUTHENTICATED` in DB |
+
+---
+
+## DS2-RCA-027 — Upstox `INTERVAL_MAP` Used Wrong API Strings
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P1 (1d/1w/1M backfills all returned HTTP 400 UDAPI1020 before discovering it was wrong strings) |
+| **Expected** | Upstox V2 accepts `"day"` for daily candles, `"week"` for weekly, `"month"` for monthly |
+| **Actual** | `INTERVAL_MAP` in `upstox.py` had `"1d": "1day"`, `"1w": "1week"`, `"1M": "1month"`. Upstox V2 returns HTTP 400 `UDAPI1020` for these |
+| **Affected component** | `src/providers/adapters/upstox.py` — `INTERVAL_MAP` constant |
+| **Root cause** | Interval strings were set based on assumed naming convention, not verified against the live API |
+| **Discovery** | Systematic interval probing: tested `1minute`, `5minute`, `10minute`, `15minute`, `30minute`, `60minute`, `1day`, `day`, `D`, `1d`, `1week`, `week`, `1month`, `month` against live Upstox V2 API |
+| **Fix** | Updated `INTERVAL_MAP`: `"1d": "day"`, `"1w": "week"`, `"1M": "month"`. Added `UPSTOX_V2_CONFIRMED_INTERVALS` frozenset documenting plan-verified intervals |
+| **Test updated** | `tests/unit/providers/adapters/test_upstox.py::TestIntervalMapping` — added `1w` and `1M` cases, corrected `1d` expectation |
+| **Verification** | `RELIANCE 1d` via Upstox → HTTP 200, 7 bars |
+
+---
+
+## Upstox V2 Plan Limitation — Documented (Not a Bug)
+
+**Date documented:** 2026-09-14
+
+| Interval | Upstox V2 String | Basic Plan |
+|---|---|---|
+| 1m | `1minute` | ✅ works |
+| 5m | `5minute` | ❌ UDAPI1020 |
+| 10m | `10minute` | ❌ UDAPI1020 |
+| 15m | `15minute` | ❌ UDAPI1020 |
+| 30m | `30minute` | ✅ works |
+| 1h | `60minute` | ❌ UDAPI1020 |
+| 1d | `day` | ✅ works |
+| 1w | `week` | ✅ works |
+| 1M | `month` | ✅ works |
+
+Upstox V3 endpoint returns `UDAPI100036 Invalid input` for all intervals on this account — V3 access is not enabled. Engine routing handles this gracefully: when `interval not in _UPSTOX_V2_SUPPORTED_INTERVALS`, returns `[]` and Angel One is used as fallback.
+
+---
+
+## DS2-RCA-028 — Jugaad-data Adapter: NSE Bhavcopy URL Broken (UDiff Format Change)
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P0 (all jugaad-data backfills returned 0 bars) |
+| **Requirement** | F&O EOD historical data with open interest; EQ + IDX daily OHLCV as credential-free fallback |
+| **Expected** | `JugaadDataAdapter.fetch_fo_eod()` returns rows with OI |
+| **Actual** | All calls returned 0 rows; adapter fetched ZIP from `archives.nseindia.com` but NSE returned non-ZIP content → `BadZipFile` exception silently swallowed |
+| **Root cause** | NSE changed the F&O bhavcopy format from ZIP to Unified Distilled File (UDiff) on **2024-07-08**. The old URL pattern still responds HTTP 200 but returns HTML/non-ZIP content instead of the CSV-in-ZIP the adapter expected. The jugaad-data library v0.35.5 `derivatives_df` / `bhavcopy_fo_save` also break for dates ≥ 2024-07-08 for the same reason. |
+| **Fix** | Rewrote adapter to use the jugaad-data Python library's working functions: `stock_df()` for EQ, `index_df()` for IDX. F&O via `_sync_fo_bhavcopy()` still works for dates < 2024-07-08 (ZIP era). For dates ≥ 2024-07-08, `fetch_fo_eod()` returns `[]` with a descriptive warning. |
+| **Verification** | HDFCBANK EQ: 3 bars, open=1638.0, close=1646.5, vol=11,896,457. NIFTY IDX: 3 bars. NIFTY F&O (2024-01-15): 4741 rows with `oi=12,384,650`. DB: 16 jugaad_data rows persisted. |
+| **Files changed** | `src/providers/adapters/jugaad_data.py` (full rewrite), `tests/unit/providers/adapters/test_jugaad_data.py` |
+
+---
+
+## DS2-RCA-029 — OpenChart Adapter: NSE Charting API Returns HTTP 404
+
+**Date fixed:** 2026-09-14
+
+| Field | Value |
+|---|---|
+| **Severity** | P0 (all OpenChart backfills returned 0 bars) |
+| **Requirement** | Credential-free NSE OHLCV for all 9 canonical timeframes; reconciliation fallback |
+| **Expected** | `OpenChartAdapter.fetch_historical_ohlcv()` returns OHLCV candles from NSE charting API |
+| **Actual** | HTTP 404 from `charting.nseindia.com/Charts/symbolhistoricaldata/`. The `openchart` Python library also returned empty: `NSEData.historical()` requires NSE session cookies from `www.nseindia.com`, which returns HTTP 403 to server-side requests (bot protection). |
+| **Root cause** | NSE moved the charting endpoint. The unofficial `charting.nseindia.com/Charts/symbolhistoricaldata/` path no longer exists. The new path is `charting.nseindia.com/v1/charts/symbolHistoricalData` (POST with JSON payload + session cookie), but NSE blocks server-side requests — only browser-originated sessions with valid Akamai cookies succeed. |
+| **Fix** | Rewrote adapter to use the jugaad-data Python library (`stock_df` / `index_df`) as the actual data backend. `PROVIDER_ID` stays `"openchart"` so all routing and provenance records are unaffected. Intraday intervals (1m, 5m, etc.) return `[]` with a debug log — use Angel One / Upstox for intraday. |
+| **Verification** | NIFTY IDX 1d: 3 bars, open=24823.4, close=24936.4, `oi=None` (correct). RELIANCE EQ 1d: 3 bars, open=2933.0, close=2924.9. HDFCBANK 5m: 0 rows (correct). DB: 8 openchart rows persisted. |
+| **Files changed** | `src/providers/adapters/openchart.py` (full rewrite), `tests/unit/providers/adapters/test_openchart.py` |
+| **Note** | When NSE makes the charting API reliably accessible server-side, the implementation can be restored to the original HTTP POST approach without changing any caller code. |

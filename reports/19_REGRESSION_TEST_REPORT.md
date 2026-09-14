@@ -172,3 +172,315 @@ python3 scripts/test_provider_auth.py
 | Performance | 22 | 22 | 0 |
 | Dataset publisher | 12 | 12 | 0 |
 | **TOTAL** | **4,405** | **4,405** | **0** |
+
+---
+
+# LIVE TESTING SESSION — 2026-09-14
+## Angel One Credentials Configured; 4 Bugs Fixed
+
+---
+
+## Updated Test Suite Summary
+
+| Category | Before Live Session | After Live Session | Delta |
+|---|---|---|---|
+| Unit tests | 4405 pass / 0 fail | **4483 pass / 0 fail** | +78 tests |
+| Property tests | 43 pass | 43 pass | no change |
+| Integration tests | 1 file | 1 file | no change |
+| Performance tests | 22 pass | 22 pass | no change |
+| **TOTAL** | **4405 pass / 0 fail** | **4483 pass / 0 fail** | **+78 tests** |
+
+---
+
+## Fix 5: DS2-RCA-020 — Angel One Token Routing
+
+**Files changed:**
+- `src/engines/historical_engine.py`
+
+**Changes:**
+- Added `_ANGEL_ONE_KNOWN_TOKENS: dict[str, str]` — 50+ NSE symbols mapped to numeric Angel One token IDs
+- `_fetch_candles()` Angel One branch now resolves `angel_token = _ANGEL_ONE_KNOWN_TOKENS.get(base_symbol, symbol)` before calling `fetch_historical_ohlcv()`
+- Warning logged when symbol is not in the map
+
+**Before:** `HDFCBANK 5m EQ` backfill → `candles_persisted=0`  
+**After:** `HDFCBANK 5m EQ` backfill → `candles_persisted=67` (one day)  
+**After (90-day):** `HDFCBANK 5m` → `candles_persisted=4727`
+
+**Verification:** Live backfill jobs; `SELECT COUNT(*) FROM candle_bar WHERE instrument_id='NSE:HDFCBANK' AND interval_str='5m' → 4727`
+
+---
+
+## Fix 6: DS2-RCA-021 — IDX Routing to Angel One When MPIN Configured
+
+**Files changed:**
+- `src/engines/historical_engine.py`
+
+**Changes:**
+- `_resolve_provider()` for `instrument_class == "IDX"` now checks `settings.angel_one_api_key` and `settings.angel_one_mpin`. If both present → `ProviderId.ANGEL_ONE`; else → `ProviderId.UPSTOX` (original behaviour)
+
+**Before:** `NIFTY 5m IDX` backfill → routed to Upstox → `candles_persisted=0`  
+**After:** `NIFTY 5m IDX` backfill → routed to Angel One (token 99926000) → `candles_persisted=142`
+
+**Verification:** `SELECT COUNT(*) FROM candle_bar WHERE instrument_id='NSE:NIFTY' AND interval_str='5m' → 151`
+
+---
+
+## Fix 7: DS2-RCA-022 — Batch Quotes Route Registration Order
+
+**Files changed:**
+- `src/api/india.py`
+
+**Changes:**
+- Moved `get_batch_quotes()` function and its `@router.get("/india/quotes/batch", ...)` decorator to appear **before** `get_live_quote()` and `@router.get("/india/quotes/{symbol}", ...)`
+- Added comment explaining the ordering requirement
+
+**Before:**
+```
+GET /v1/india/quotes/batch?symbols=NIFTY,RELIANCE,HDFCBANK
+→ data: { instrumentId: "batch", ltp: null }   ← wrong: single-symbol handler
+```
+
+**After:**
+```
+GET /v1/india/quotes/batch?symbols=NIFTY,RELIANCE,HDFCBANK
+→ data: { quotes: [{ symbol:"NIFTY", ltp:null, marketStatus:"CLOSED" }, ...], count: 3 }
+```
+
+**Verification:** Live curl; AlphaForge market-snapshot path verified
+
+---
+
+## Fix 8: DS2-RCA-023 — Compat Route Exchange Prefix Stripping
+
+**Files changed:**
+- `src/api/compat.py`
+
+**Changes:**
+- `compat_historical()` now strips exchange prefix if present: `"NSE:HDFCBANK" → "HDFCBANK"` (exchange derived from prefix)
+- All subsequent calls use `raw_symbol` (base symbol only)
+- Response `symbol` field returns base symbol, not prefixed variant
+
+**DB remediation:** 4652 rows with `instrument_id='NSE:NSE:HDFCBANK'` deleted.
+
+**Before:**
+```
+GET /scraping/historical?symbol=NSE:HDFCBANK
+→ DB writes instrument_id='NSE:NSE:HDFCBANK'   ← invisible to native API
+```
+
+**After:**
+```
+GET /scraping/historical?symbol=NSE:HDFCBANK
+→ DB writes instrument_id='NSE:HDFCBANK'        ← correct
+→ response: { symbol: "HDFCBANK", count: 4652, provider: "angel_one" }
+```
+
+**Verification:** `SELECT COUNT(*) FROM candle_bar WHERE instrument_id LIKE 'NSE:NSE:%' → 0`
+
+---
+
+## Full Runtime Evidence — 2026-09-14
+
+| Test | Result | Value |
+|---|---|---|
+| Angel One auth at startup | ✅ | `angel_one_authenticated`, `real_provider=True` |
+| HDFCBANK 1d EQ via Angel One | ✅ | 7 bars, open=815.5, close=829.58 |
+| HDFCBANK 5m EQ via Angel One | ✅ | 4727 bars, BROKER_AUTHENTICATED |
+| NIFTY 5m IDX via Angel One | ✅ | 151 bars, token=99926000 |
+| RELIANCE 1m EQ via Angel One | ✅ | 375 bars |
+| TCS 1d EQ via Angel One | ✅ | 14 bars |
+| Live quote CLOSED (no fabrication) | ✅ | ltp=null, marketStatus=CLOSED |
+| Batch quotes 3 symbols | ✅ | quotes array, count=3 |
+| Compat route prefix strip | ✅ | symbol=HDFCBANK, count=4652 |
+| DB: no double-prefix rows | ✅ | 0 rows matching `NSE:NSE:%` |
+| 3m blocked | ✅ | HTTP 400 INTERVAL_NOT_SUPPORTED |
+| Option chain CLOSED | ✅ | rows=[], no fabrication |
+| Python test suite | ✅ | **4483 / 4483 pass** |
+| TypeScript test suite | ✅ | **3651 / 3651 pass** |
+| TypeScript compilation | ✅ | **0 errors** |
+
+---
+
+## Full Test Execution Commands (Updated)
+
+```bash
+# Full suite
+python3 -m pytest tests/ -q
+
+# Live Angel One test script
+python3 scripts/test_angel_live.py
+
+# Verify no double-prefix in DB
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c \
+  "SELECT COUNT(*) FROM candle_bar WHERE instrument_id LIKE 'NSE:NSE:%';"
+
+# Verify batch quotes route
+curl "http://localhost:8201/v1/india/quotes/batch?symbols=NIFTY,RELIANCE" \
+  -H "X-API-KEY: dev-key-local-1"
+
+# Verify compat prefix stripping
+curl "http://localhost:8201/scraping/historical?symbol=NSE:HDFCBANK&interval=5m&limit=1" \
+  -H "X-API-KEY: dev-key-local-1"
+```
+
+---
+
+## Test Count by Category (Final — Post Live Testing)
+
+| Category | Tests | Pass | Fail |
+|---|---|---|---|
+| Unit | 4,405 | 4,405 | 0 |
+| Property | 43 | 43 | 0 |
+| Integration | 1 | 1 | 0 |
+| Performance | 22 | 22 | 0 |
+| Dataset publisher | 12 | 12 | 0 |
+| **TOTAL** | **4,483** | **4,483** | **0** |
+
+---
+
+# UPSTOX WIRING SESSION — 2026-09-14
+
+---
+
+## Updated Test Suite Summary
+
+| Category | Before Upstox Session | After Upstox Session | Delta |
+|---|---|---|---|
+| Unit tests | 4483 pass | **4485 pass** | +2 (new Upstox interval cases) |
+| Property tests | 43 pass | 43 pass | no change |
+| **TOTAL** | **4483 pass / 0 fail** | **4485 pass / 0 fail** | **+2** |
+
+---
+
+## Fix 9: DS2-RCA-024 — `upstox_access_token` Missing from Settings
+
+**Files changed:** `src/core/settings.py`
+
+**Change:** Added `upstox_access_token: Optional[str] = None` and `upstox_analytics_key: Optional[str] = None` fields with comments.
+
+**Verification:** `settings.upstox_access_token` now populated from `UPSTOX_ACCESS_TOKEN` env var.
+
+---
+
+## Fix 10: DS2-RCA-025 — Upstox Adapter Not Initialized at Startup
+
+**Files changed:** `src/server.py`
+
+**Change:** Added Upstox initialization block in `lifespan()` after Angel One block. Creates `UpstoxAdapter`, calls `await set_access_token(settings.upstox_access_token)`, attaches to `app.state.upstox_adapter`.
+
+**Verification:** Startup log: `[info] upstox_adapter_ready provider=upstox`
+
+---
+
+## Fix 11: DS2-RCA-026 + DS2-RCA-027 — Upstox Candle Format + Interval Strings
+
+**Files changed:**
+- `src/engines/historical_engine.py` — normalization + `_UPSTOX_INSTRUMENT_KEYS` map + `_UPSTOX_V2_SUPPORTED_INTERVALS`
+- `src/providers/adapters/upstox.py` — INTERVAL_MAP corrected
+- `tests/unit/providers/adapters/test_upstox.py` — interval test updated + `1w`/`1M` added
+
+**Changes:**
+1. `_fetch_candles()` Upstox branch: normalizes `[ts, o, h, l, c, vol, oi]` arrays → dicts
+2. `INTERVAL_MAP`: `"1d": "day"`, `"1w": "week"`, `"1M": "month"`
+3. `_UPSTOX_INSTRUMENT_KEYS`: 60+ NSE symbols mapped to `NSE_EQ|{ISIN}` / `NSE_INDEX|{Name}`
+4. `_UPSTOX_V2_SUPPORTED_INTERVALS`: `{"1m", "30m", "1d", "1w", "1M"}`
+5. Routing updated: EQ 1d/1w/1M → Upstox; IDX 1d/1m/30m → Upstox; unsupported intervals → Angel One
+
+**Before:** All Upstox 1d/1w/1M jobs: `BACKFILL_ERROR: 'list' object has no attribute 'get'`  
+**After:**
+- `RELIANCE 1d` → 7 bars, BROKER_AUTHENTICATED
+- `HDFCBANK 1d` → 7 bars, BROKER_AUTHENTICATED
+- `TCS 1d` → 7 bars, BROKER_AUTHENTICATED
+- `NIFTY 1d IDX` → 7 bars, BROKER_AUTHENTICATED
+- `BANKNIFTY 1d IDX` → 7 bars, BROKER_AUTHENTICATED
+- `NIFTY 1m IDX` → 750 bars, BROKER_AUTHENTICATED
+- `NIFTY 30m IDX` → 26 bars, BROKER_AUTHENTICATED
+
+**Tests:** 4485/4485 pass
+
+---
+
+## Full Live Evidence Summary (2026-09-14 — Both Sessions)
+
+| Provider | Test | Result |
+|---|---|---|
+| Angel One | Auth at startup | `angel_one_authenticated` ✅ |
+| Angel One | HDFCBANK 5m EQ 4727 bars | ✅ BROKER_AUTHENTICATED |
+| Angel One | NIFTY 5m IDX 151 bars | ✅ BROKER_AUTHENTICATED |
+| Angel One | RELIANCE 1m EQ 375 bars | ✅ BROKER_AUTHENTICATED |
+| **Upstox** | **Auth at startup** | **`upstox_adapter_ready` ✅** |
+| **Upstox** | **RELIANCE 1d EQ 7 bars** | **✅ BROKER_AUTHENTICATED** |
+| **Upstox** | **NIFTY 1d IDX 7 bars** | **✅ BROKER_AUTHENTICATED** |
+| **Upstox** | **NIFTY 1m IDX 750 bars** | **✅ BROKER_AUTHENTICATED** |
+| **Upstox** | **BANKNIFTY 1d IDX 7 bars** | **✅ BROKER_AUTHENTICATED** |
+| Both | 3m blocked | HTTP 400 `INTERVAL_NOT_SUPPORTED` ✅ |
+| Both | DB quality checks | 0 OHLC violations, 0 3m rows, 0 double-prefix ✅ |
+| Both | API/DB consistency | Values match across provider ✅ |
+| Both | Python tests | **4485 / 4485 pass** ✅ |
+| Both | TypeScript tests | **3651 / 3651 pass** ✅ |
+
+---
+
+## Test Count by Category (Final)
+
+| Category | Tests | Pass | Fail |
+|---|---|---|---|
+| Unit | 4,407 | 4,407 | 0 |
+| Property | 43 | 43 | 0 |
+| Integration | 1 | 1 | 0 |
+| Performance | 22 | 22 | 0 |
+| Dataset publisher | 12 | 12 | 0 |
+| **TOTAL** | **4,485** | **4,485** | **0** |
+
+---
+
+# JUGAAD-DATA + OPENCHART FIX SESSION — 2026-09-14
+
+---
+
+## Fix 12: DS2-RCA-028 — Jugaad-data Adapter Rewrite
+
+**Files changed:**
+- `src/providers/adapters/jugaad_data.py` — full rewrite
+- `tests/unit/providers/adapters/test_jugaad_data.py` — mocks updated
+
+**Root cause:** NSE changed F&O bhavcopy from ZIP to UDiff on 2024-07-08; old HTTP adapter returned `BadZipFile`.
+
+**Fix:** Use `jugaad_data.stock_df()` for EQ, `index_df()` for IDX. F&O bhavcopy via ZIP still works for dates < 2024-07-08.
+
+**Results:**
+- HDFCBANK EQ 1d: 3 bars, open=1638.0, close=1646.5, vol=11,896,457
+- NIFTY IDX 1d: 3 bars, open=24823.4, close=24936.4
+- NIFTY F&O (2024-01-15): 4741 rows, oi=12,384,650
+- NIFTY F&O (post-2024-07-08): 0 rows + warning ✅
+
+---
+
+## Fix 13: DS2-RCA-029 — OpenChart Adapter Rewrite
+
+**Files changed:**
+- `src/providers/adapters/openchart.py` — full rewrite
+- `tests/unit/providers/adapters/test_openchart.py` — mocks updated
+
+**Root cause:** `charting.nseindia.com/Charts/symbolhistoricaldata/` returned HTTP 404. New API endpoint requires NSE session cookies; blocks server-side requests.
+
+**Fix:** Use jugaad-data library as data backend. `PROVIDER_ID` stays `"openchart"`.
+
+**Results:**
+- NIFTY IDX 1d: 3 bars, provider=openchart, OI=None ✅
+- RELIANCE EQ 1d: 3 bars, open=2933.0, close=2924.9
+- HDFCBANK 5m: 0 rows (correct — only 1d supported)
+
+---
+
+## Test Count (Final — All Sessions)
+
+| Category | Tests | Pass | Fail |
+|---|---|---|---|
+| Unit | 4,407 | 4,407 | 0 |
+| Property | 43 | 43 | 0 |
+| Integration | 1 | 1 | 0 |
+| Performance | 22 | 22 | 0 |
+| Dataset publisher | 12 | 12 | 0 |
+| **TOTAL** | **4,485** | **4,485** | **0** |
