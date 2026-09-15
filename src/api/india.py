@@ -798,7 +798,7 @@ async def get_historical_ohlcv(
         ),
     ] = None,
 ) -> Response:
-    """Return historical OHLCV candles from the candle_bar table.
+    """Return historical OHLCV candles from the canonical equity_candle table.
 
     - ``interval=3m`` → HTTP 400 ``INTERVAL_NOT_SUPPORTED``
     - Any unrecognised interval → HTTP 400 ``INTERVAL_NOT_SUPPORTED``
@@ -806,6 +806,9 @@ async def get_historical_ohlcv(
     - Up to 10,000 records; ``metadata.truncated: true`` when limit reached.
     - Response ``metadata`` includes ``provider``, ``provenance``, ``quality``,
       ``gaps``, and ``dataAsOf`` (Requirement 4.9).
+    - NSE/BSE equities and indices: reads from equity_candle (TimescaleDB).
+    - NFO/BFO futures: reads from futures_candle.
+    - candle_bar is NOT read by this endpoint.
     """
     req_id = _request_id()
 
@@ -880,7 +883,7 @@ async def get_historical_ohlcv(
             status_code=400,
         )
 
-    # ── Query candle_bar ───────────────────────────────────────────────────
+    # ── Query canonical table (equity_candle / futures_candle) ────────────
     db_engine = getattr(request.app.state, "db_engine", None)
     candles: list[dict] = []
     truncated = False
@@ -1322,7 +1325,12 @@ async def _query_candles(
     to_dt: datetime,
     max_records: int,
 ) -> tuple[list[dict], bool, Optional[str]]:
-    """Query the candle_bar table and return normalised candle records.
+    """Query the canonical equity_candle table and return normalised records.
+
+    Routing (candle_bar is archive-only — never read by production queries):
+      NSE equities and indices → equity_candle
+      NFO futures              → futures_candle  (future: when F&O data exists)
+      NFO options              → options_candle  (future: when F&O data exists)
 
     Returns a 3-tuple of ``(candles, truncated, provider_name)``:
     - ``candles``: list of OHLCV dicts ready for the API response.
@@ -1336,24 +1344,55 @@ async def _query_candles(
 
     instrument_id = f"{exchange.upper()}:{symbol.upper()}"
 
-    select_sql = text(
-        """
-        SELECT
-            EXTRACT(EPOCH FROM time)::bigint AS time_epoch,
-            open, high, low, close, volume, oi,
-            volume_unavailable, provider, poor_quality,
-            normalisation_version, session_date
-        FROM candle_bar
-        WHERE instrument_id = :instrument_id
-          AND exchange       = :exchange
-          AND interval_str   = :interval_str
-          AND time           >= :from_ts
-          AND time            < :to_ts
-          AND poor_quality    = FALSE
-        ORDER BY time ASC
-        LIMIT :limit
-        """
-    )
+    # Route to the correct canonical table.
+    # Currently all queries are against equity_candle (EQ + IDX segments).
+    # When futures_candle and options_candle are populated, the router will
+    # use exchange/instrument_class to select the right table.
+    if exchange.upper() in ("NFO", "BFO"):
+        # F&O instruments — query futures_candle first, fall back to options_candle
+        # if the instrument has a strike (options). For now, since F&O data
+        # has not yet been backfilled, we query futures_candle.
+        select_sql = text(
+            """
+            SELECT
+                EXTRACT(EPOCH FROM time)::bigint AS time_epoch,
+                open, high, low, close, volume,
+                open_interest AS oi,
+                FALSE AS volume_unavailable,
+                provider, poor_quality,
+                normalisation_version, session_date
+            FROM futures_candle
+            WHERE instrument_id = :instrument_id
+              AND exchange       = :exchange
+              AND interval_str   = :interval_str
+              AND time           >= :from_ts
+              AND time            < :to_ts
+              AND poor_quality    = FALSE
+            ORDER BY time ASC
+            LIMIT :limit
+            """
+        )
+    else:
+        # NSE/BSE equities and indices → equity_candle
+        select_sql = text(
+            """
+            SELECT
+                EXTRACT(EPOCH FROM time)::bigint AS time_epoch,
+                open, high, low, close, volume,
+                NULL::bigint AS oi,
+                volume_unavailable, provider, poor_quality,
+                normalisation_version, session_date
+            FROM equity_candle
+            WHERE instrument_id = :instrument_id
+              AND exchange       = :exchange
+              AND interval_str   = :interval_str
+              AND time           >= :from_ts
+              AND time            < :to_ts
+              AND poor_quality    = FALSE
+            ORDER BY time ASC
+            LIMIT :limit
+            """
+        )
 
     try:
         async with db_engine.connect() as conn:

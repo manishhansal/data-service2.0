@@ -6,7 +6,11 @@ The HistoricalEngine is responsible for:
     instruments, and Binance crypto.
   - Splitting large date ranges into provider-safe chunks (per Capability Matrix
     chunk limits).
-  - Persisting candles to the ``candle_bar`` table via bulk upsert.
+  - Persisting candles to the appropriate canonical table via bulk upsert:
+      EQ / IDX  → equity_candle    (TimescaleDB hypertable)
+      FO / FUT  → futures_candle   (TimescaleDB hypertable)
+      OPT       → options_candle   (TimescaleDB hypertable)
+  - NEVER writing to candle_bar — that table is an archive only.
   - Maintaining a resumable checkpoint in Redis so that interrupted backfill
     jobs resume from the last successfully persisted candle, not from scratch.
 
@@ -29,8 +33,9 @@ Resume behaviour (Requirement 10.2):
   On next run, if a checkpoint exists the ``from_ts`` is overridden with the
   checkpoint value so acquisition starts from where it left off.
 
-Bulk upsert pattern (design §candle_bar DDL):
-  INSERT … ON CONFLICT (instrument_id, exchange, interval_str, time) DO UPDATE …
+Canonical table routing (Requirement: Phase 2-4 cutover):
+  INSERT … ON CONFLICT DO UPDATE is used against equity_candle, futures_candle,
+  or options_candle — never against candle_bar.
 
 Requirements: 4.1, 4.2, 10.1, 10.2, 10.3, 10.4, 10.11
 """
@@ -404,6 +409,11 @@ class HistoricalEngine:
         self._angel_one_adapter: Optional["AngelOneAdapter"] = None  # type: ignore[name-defined]  # noqa: F821
         self._upstox_adapter: Optional["UpstoxAdapter"] = None  # type: ignore[name-defined]  # noqa: F821
 
+        # DB engine reference — stored here so _fetch_candles can resolve
+        # Angel One tokens from instrument_master for F&O symbols.
+        # Set by run_backfill() when db_engine is provided.
+        self._db_engine: Optional["AsyncEngine"] = None
+
     # ------------------------------------------------------------------ #
     # Core public method
     # ------------------------------------------------------------------ #
@@ -481,6 +491,9 @@ class HistoricalEngine:
             )
 
         instrument_id = f"{exchange}:{symbol}"
+
+        # Store db_engine on self so _fetch_candles can do token lookups
+        self._db_engine = db_engine
 
         # ── Read checkpoint (resume from last persisted candle if present) ─
         checkpoint_ts = await self.get_checkpoint(
@@ -601,7 +614,7 @@ class HistoricalEngine:
                 )
                 incidents.extend(chunk_incidents)
 
-                # Bulk upsert valid candles to candle_bar.
+                # Bulk upsert valid candles to the canonical table.
                 if valid_candles:
                     await self.bulk_upsert_candles(
                         candles=valid_candles,
@@ -610,6 +623,7 @@ class HistoricalEngine:
                         exchange=exchange,
                         interval=interval,
                         provider=actual_provider.value,
+                        instrument_class=instrument_class,
                     )
                     candles_persisted += len(valid_candles)
 
@@ -1070,6 +1084,60 @@ class HistoricalEngine:
     # ------------------------------------------------------------------ #
 
     @staticmethod
+    def _canonical_table_for(
+        instrument_class: str,
+        exchange: str,
+    ) -> str:
+        """Return the canonical write table name for the given instrument class.
+
+        Routing (non-negotiable — candle_bar is archive-only):
+          EQ / IDX / ETF (NSE/BSE cash)  → equity_candle
+          FO / FUT                        → futures_candle
+          OPT / OPTIDX / OPTSTK          → options_candle
+
+        Crypto (BINANCE, DELTA) is NOT routed here — those writers
+        (BinancePersistenceLayer, DeltaPersistenceLayer) manage their own
+        persistence to candle_bar until a crypto_candle table is created.
+
+        Args:
+            instrument_class:  One of "EQ", "IDX", "ETF", "FO", "FUT",
+                               "OPT", "OPTIDX", "OPTSTK", or exchange-derived.
+            exchange:          Exchange string — used as a secondary signal
+                               when instrument_class is ambiguous.
+
+        Returns:
+            Table name string: "equity_candle" | "futures_candle" | "options_candle"
+        """
+        cls = instrument_class.upper().strip()
+        exch = exchange.upper().strip()
+
+        # Options — check before FO because OPTIDX/OPTSTK are sub-types of FO
+        if cls in ("OPT", "OPTIDX", "OPTSTK"):
+            return "options_candle"
+
+        # Futures
+        if cls in ("FO", "FUT", "FUTSTK", "FUTIDX"):
+            return "futures_candle"
+
+        # Equities + Indices + ETFs
+        if cls in ("EQ", "IDX", "ETF", "EQ_IDX"):
+            return "equity_candle"
+
+        # Exchange-derived fallback: NFO/BFO without explicit class → futures
+        if exch in ("NFO", "BFO", "MCX"):
+            return "futures_candle"
+
+        # Default: equity_candle for unknown Indian-market classes
+        logger.warning(
+            "canonical_table_unknown_class",
+            component="historical_engine",
+            instrument_class=instrument_class,
+            exchange=exchange,
+            fallback="equity_candle",
+        )
+        return "equity_candle"
+
+    @staticmethod
     async def bulk_upsert_candles(
         candles: list[dict],
         *,
@@ -1079,20 +1147,20 @@ class HistoricalEngine:
         interval: str,
         provider: str,
         normalisation_version: str = "2.0.0",
+        instrument_class: str = "EQ",
     ) -> int:
-        """Bulk upsert candles into the ``candle_bar`` table.
+        """Bulk upsert candles into the appropriate canonical table.
 
-        Uses the ON CONFLICT … DO UPDATE pattern from the design (§ Bulk
-        Upsert Pattern) so idempotent re-runs do not create duplicates.
+        Routing (candle_bar is archive-only — never written by this method):
+          EQ / IDX / ETF  → equity_candle       (TimescaleDB hypertable)
+          FO / FUT        → futures_candle       (TimescaleDB hypertable)
+          OPT             → options_candle       (TimescaleDB hypertable)
 
-        Each row upserted maps to the canonical ``candle_bar`` schema.  The
-        ``dataset_version`` is taken from each candle dict if present;
-        otherwise defaults to 1.
+        Uses the ON CONFLICT … DO UPDATE pattern so idempotent re-runs do
+        not create duplicates.
 
         Args:
-            candles:                List of normalised candle dicts.  Each must
-                                    have at least ``time``, ``open``, ``high``,
-                                    ``low``, ``close``, ``volume`` fields.
+            candles:                List of normalised candle dicts.
             db_engine:              Async SQLAlchemy engine.
             symbol:                 Trading symbol (used as ``instrument_id``
                                     if the candle dict lacks one).
@@ -1100,6 +1168,8 @@ class HistoricalEngine:
             interval:               Candle interval string.
             provider:               Provider string (stored as provenance).
             normalisation_version:  Semver string attached to each row.
+            instrument_class:       Used to select the canonical target table.
+                                    Defaults to "EQ" (equity_candle).
 
         Returns:
             Number of rows successfully upserted.
@@ -1112,6 +1182,15 @@ class HistoricalEngine:
             return 0
 
         from sqlalchemy import text  # local import avoids top-level dep
+
+        # Determine the canonical target table for this instrument class.
+        target_table = HistoricalEngine._canonical_table_for(
+            instrument_class=instrument_class,
+            exchange=exchange,
+        )
+
+        # Segment label (EQ | IDX | ETF) used only by equity_candle.
+        segment = "IDX" if instrument_class.upper() in ("IDX",) else "EQ"
 
         # Build the list of row dicts for the upsert.
         rows = []
@@ -1144,7 +1223,7 @@ class HistoricalEngine:
                     "low": float(c["low"]),
                     "close": float(c["close"]),
                     "volume": int(c.get("volume") or 0),
-                    "oi": c.get("oi"),
+                    "oi": c.get("oi"),          # used by futures/options only
                     "volume_unavailable": bool(c.get("volumeUnavailable", False)),
                     "provider": provider,
                     "source_type": c.get("sourceType", "OPEN_SOURCE_NSE_DERIVED"),
@@ -1152,41 +1231,120 @@ class HistoricalEngine:
                     "session_date": session_date,
                     "normalisation_version": normalisation_version,
                     "poor_quality": bool(c.get("poorQuality", False)),
+                    # equity_candle-specific
+                    "segment": segment,
+                    # futures/options-specific (None for equity)
+                    "expiry": c.get("expiry"),
+                    "strike": c.get("strike"),
+                    "option_type": c.get("optionType"),
                 }
             )
 
         if not rows:
             return 0
 
-        upsert_sql = text(
-            """
-            INSERT INTO candle_bar (
-                instrument_id, exchange, interval_str, time,
-                open, high, low, close, volume, oi,
-                volume_unavailable, provider, source_type,
-                dataset_version, session_date, normalisation_version,
-                poor_quality
-            ) VALUES (
-                :instrument_id, :exchange, :interval_str, :time,
-                :open, :high, :low, :close, :volume, :oi,
-                :volume_unavailable, :provider, :source_type,
-                :dataset_version, :session_date, :normalisation_version,
-                :poor_quality
+        # ── equity_candle upsert ───────────────────────────────────────────
+        if target_table == "equity_candle":
+            upsert_sql = text(
+                """
+                INSERT INTO equity_candle (
+                    instrument_id, exchange, segment, interval_str, time,
+                    open, high, low, close, volume,
+                    volume_unavailable, provider, source_type,
+                    dataset_version, session_date, normalisation_version,
+                    poor_quality, data_origin, quality_status
+                ) VALUES (
+                    :instrument_id, :exchange, :segment, :interval_str, :time,
+                    :open, :high, :low, :close, :volume,
+                    :volume_unavailable, :provider, :source_type,
+                    :dataset_version, :session_date, :normalisation_version,
+                    :poor_quality, 'PROVIDER',
+                    CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END
+                )
+                ON CONFLICT (instrument_id, exchange, interval_str, time)
+                DO UPDATE SET
+                    open                  = EXCLUDED.open,
+                    high                  = EXCLUDED.high,
+                    low                   = EXCLUDED.low,
+                    close                 = EXCLUDED.close,
+                    volume                = EXCLUDED.volume,
+                    provider              = EXCLUDED.provider,
+                    dataset_version       = EXCLUDED.dataset_version,
+                    normalisation_version = EXCLUDED.normalisation_version,
+                    poor_quality          = EXCLUDED.poor_quality,
+                    quality_status        = EXCLUDED.quality_status
+                """
             )
-            ON CONFLICT (instrument_id, exchange, interval_str, time)
-            DO UPDATE SET
-                open                  = EXCLUDED.open,
-                high                  = EXCLUDED.high,
-                low                   = EXCLUDED.low,
-                close                 = EXCLUDED.close,
-                volume                = EXCLUDED.volume,
-                oi                    = EXCLUDED.oi,
-                provider              = EXCLUDED.provider,
-                dataset_version       = EXCLUDED.dataset_version,
-                normalisation_version = EXCLUDED.normalisation_version,
-                poor_quality          = EXCLUDED.poor_quality
-            """
-        )
+        # ── futures_candle upsert ─────────────────────────────────────────
+        elif target_table == "futures_candle":
+            upsert_sql = text(
+                """
+                INSERT INTO futures_candle (
+                    instrument_id, exchange, interval_str, time,
+                    open, high, low, close, volume, open_interest,
+                    provider, source_type,
+                    dataset_version, session_date, normalisation_version,
+                    poor_quality, data_origin, quality_status,
+                    expiry
+                ) VALUES (
+                    :instrument_id, :exchange, :interval_str, :time,
+                    :open, :high, :low, :close, :volume, :oi,
+                    :provider, :source_type,
+                    :dataset_version, :session_date, :normalisation_version,
+                    :poor_quality, 'PROVIDER',
+                    CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
+                    :expiry
+                )
+                ON CONFLICT (instrument_id, exchange, interval_str, time)
+                DO UPDATE SET
+                    open                  = EXCLUDED.open,
+                    high                  = EXCLUDED.high,
+                    low                   = EXCLUDED.low,
+                    close                 = EXCLUDED.close,
+                    volume                = EXCLUDED.volume,
+                    open_interest         = EXCLUDED.open_interest,
+                    provider              = EXCLUDED.provider,
+                    dataset_version       = EXCLUDED.dataset_version,
+                    normalisation_version = EXCLUDED.normalisation_version,
+                    poor_quality          = EXCLUDED.poor_quality,
+                    quality_status        = EXCLUDED.quality_status
+                """
+            )
+        # ── options_candle upsert ─────────────────────────────────────────
+        else:  # options_candle
+            upsert_sql = text(
+                """
+                INSERT INTO options_candle (
+                    instrument_id, exchange, interval_str, time,
+                    open, high, low, close, volume, open_interest,
+                    provider, source_type,
+                    dataset_version, session_date, normalisation_version,
+                    poor_quality, data_origin, quality_status,
+                    expiry, strike, option_type
+                ) VALUES (
+                    :instrument_id, :exchange, :interval_str, :time,
+                    :open, :high, :low, :close, :volume, :oi,
+                    :provider, :source_type,
+                    :dataset_version, :session_date, :normalisation_version,
+                    :poor_quality, 'PROVIDER',
+                    CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
+                    :expiry, :strike, :option_type
+                )
+                ON CONFLICT (instrument_id, exchange, interval_str, time)
+                DO UPDATE SET
+                    open                  = EXCLUDED.open,
+                    high                  = EXCLUDED.high,
+                    low                   = EXCLUDED.low,
+                    close                 = EXCLUDED.close,
+                    volume                = EXCLUDED.volume,
+                    open_interest         = EXCLUDED.open_interest,
+                    provider              = EXCLUDED.provider,
+                    dataset_version       = EXCLUDED.dataset_version,
+                    normalisation_version = EXCLUDED.normalisation_version,
+                    poor_quality          = EXCLUDED.poor_quality,
+                    quality_status        = EXCLUDED.quality_status
+                """
+            )
 
         try:
             async with db_engine.begin() as conn:
@@ -1195,6 +1353,7 @@ class HistoricalEngine:
             logger.info(
                 "bulk_upsert_complete",
                 component="historical_engine",
+                target_table=target_table,
                 exchange=exchange,
                 interval=interval,
                 provider=provider,
@@ -1205,6 +1364,7 @@ class HistoricalEngine:
             logger.error(
                 "bulk_upsert_failed",
                 component="historical_engine",
+                target_table=target_table,
                 exchange=exchange,
                 interval=interval,
                 provider=provider,
@@ -1260,6 +1420,15 @@ class HistoricalEngine:
             return ProviderId.UPSTOX
 
         if instrument_class == "FO" and interval == "1d":
+            # Jugaad-data F&O bhavcopy is broken for dates after 2024-07-08
+            # (NSE changed the format). Use Angel One for F&O EOD instead.
+            from src.core.settings import get_settings  # noqa: PLC0415
+            settings = get_settings()
+            if settings.angel_one_api_key and settings.angel_one_mpin:
+                return ProviderId.ANGEL_ONE
+            # Upstox as secondary option for F&O EOD
+            if settings.upstox_access_token:
+                return ProviderId.UPSTOX
             return ProviderId.JUGAAD_DATA
 
         if instrument_class in ("EQ", "FO"):
@@ -1391,7 +1560,35 @@ class HistoricalEngine:
                 # Priority: 1) instrument_master DB  2) well-known token map
                 angel_token: str = symbol  # fallback: plain symbol (may fail)
                 base_symbol = symbol.split(":")[1] if ":" in symbol else symbol
-                if base_symbol in _ANGEL_ONE_KNOWN_TOKENS:
+                instrument_id = f"{exchange}:{base_symbol}"
+
+                # Priority 1: Look up from instrument_master table via DB
+                if self._db_engine is not None:
+                    from sqlalchemy import text as _text  # noqa: PLC0415
+                    try:
+                        async with self._db_engine.connect() as _conn:
+                            _row = (await _conn.execute(
+                                _text("SELECT angel_token FROM instrument_master WHERE instrument_id=:iid OR (trading_symbol=:sym AND exchange=:exch) LIMIT 1"),
+                                {"iid": instrument_id, "sym": base_symbol, "exch": exchange},
+                            )).mappings().first()
+                        if _row and _row.get("angel_token"):
+                            angel_token = _row["angel_token"]
+                            logger.debug(
+                                "angel_one_token_resolved_from_db",
+                                component="historical_engine",
+                                symbol=symbol,
+                                token=angel_token,
+                            )
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.debug(
+                            "angel_one_token_db_lookup_failed",
+                            component="historical_engine",
+                            symbol=symbol,
+                            error=str(_exc),
+                        )
+
+                # Priority 2: Fall back to well-known token map
+                if angel_token == symbol and base_symbol in _ANGEL_ONE_KNOWN_TOKENS:
                     angel_token = _ANGEL_ONE_KNOWN_TOKENS[base_symbol]
                     logger.debug(
                         "angel_one_token_resolved_from_map",
@@ -1399,12 +1596,12 @@ class HistoricalEngine:
                         symbol=symbol,
                         token=angel_token,
                     )
-                else:
+                elif angel_token == symbol:
                     logger.warning(
                         "angel_one_token_unknown",
                         component="historical_engine",
                         symbol=symbol,
-                        hint="Add token to _ANGEL_ONE_KNOWN_TOKENS or populate instrument_master",
+                        hint="Token not found in instrument_master or _ANGEL_ONE_KNOWN_TOKENS",
                     )
 
                 # Reuse a pre-authenticated shared adapter when available
