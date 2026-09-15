@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── Angel One adapter (live quotes, option chain, broker analytics) ──────
     # Credentials from env vars — never logged.
+    # Redis is injected so workers share the JWT token (prevents TOTP conflict).
     app.state.angel_one_adapter = None
     if (
         settings.angel_one_api_key
@@ -79,6 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 client_id=settings.angel_one_client_id,
                 totp_secret=settings.angel_one_totp_secret,
                 mpin=settings.angel_one_mpin,
+                redis_client=app.state.redis,  # enables cross-worker JWT sharing
             )
             await adapter.ensure_authenticated()
             app.state.angel_one_adapter = adapter
@@ -135,6 +137,42 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
     except Exception as exc:  # noqa: BLE001
         await logger.awarning("market_engine_init_failed", error=str(exc))
+
+    # ── InstrumentMasterService (loads instrument_master table into memory) ──
+    app.state.instrument_master = None
+    if app.state.db_engine is not None:
+        try:
+            from src.engines.instrument_master import InstrumentMasterService  # noqa: PLC0415
+            im_service = InstrumentMasterService()
+            await im_service.load_from_db(app.state.db_engine)
+            app.state.instrument_master = im_service
+            await logger.ainfo(
+                "instrument_master_loaded",
+                instrument_count=len(im_service._instruments),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning(
+                "instrument_master_load_failed",
+                error=str(exc),
+                note="Instrument lookups will return empty results",
+            )
+
+    # ── HistoricalEngine — inject shared authenticated adapters ──────────────
+    # Pre-create the HistoricalEngine and inject the shared adapter instances
+    # so backfill jobs reuse the active JWT session (no new TOTP logins needed).
+    try:
+        from src.engines.historical_engine import HistoricalEngine  # noqa: PLC0415
+        hist_engine = HistoricalEngine()
+        if app.state.angel_one_adapter is not None:
+            hist_engine._angel_one_adapter = app.state.angel_one_adapter
+        if app.state.upstox_adapter is not None:
+            hist_engine._upstox_adapter = app.state.upstox_adapter
+        if app.state.db_engine is not None:
+            hist_engine._db_engine = app.state.db_engine
+        app.state.historical_engine = hist_engine
+        await logger.ainfo("historical_engine_ready")
+    except Exception as exc:  # noqa: BLE001
+        await logger.awarning("historical_engine_init_failed", error=str(exc))
 
     await logger.ainfo("data_service_ready", version="2.0.0")
 
