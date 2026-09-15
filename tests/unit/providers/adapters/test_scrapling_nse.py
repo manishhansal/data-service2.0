@@ -169,12 +169,34 @@ class TestFetchLiveQuote:
     async def test_successful_quote_source_type_is_open_source_nse_derived(
         self, adapter: ScraplingNseAdapter
     ) -> None:
-        """_sourceType must be OPEN_SOURCE_NSE_DERIVED on every successful response."""
-        payload = _make_live_quote_payload("NIFTY")
+        """_sourceType must be OPEN_SOURCE_NSE_DERIVED on every successful response.
 
-        with patch.object(adapter, "_get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = payload
+        NIFTY is an index symbol — the adapter routes it through fetch_all_indices()
+        (the /api/allIndices endpoint) rather than _get with /api/quote-equity.
+        We mock fetch_all_indices() to return a minimal allIndices dict so the
+        index fast path resolves the symbol and returns the expected _sourceType.
+        """
+        all_indices_data = {
+            "NIFTY 50": {
+                "indexSymbol": "NIFTY 50",
+                "index": "NIFTY 50",
+                "last": 23328.0,
+                "open": 23100.0,
+                "high": 23450.0,
+                "low": 23050.0,
+                "previousClose": 23200.0,
+                "percentChange": 0.55,
+                "change": 128.0,
+                "totalTradedVolume": 0,
+                "yearHigh": 26277.35,
+                "yearLow": 21964.60,
+            }
+        }
 
+        with patch.object(
+            adapter, "fetch_all_indices", new_callable=AsyncMock
+        ) as mock_fetch_all:
+            mock_fetch_all.return_value = all_indices_data
             result = await adapter.fetch_live_quote("NIFTY")
 
         assert result["_sourceType"] == SourceType.OPEN_SOURCE_NSE_DERIVED.value
