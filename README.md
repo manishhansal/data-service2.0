@@ -34,12 +34,13 @@ Single market-data authority for AlphaForge. Every market data request flows thr
 9. [Architecture Overview](#9-architecture-overview)
 10. [Market Data Coverage](#10-market-data-coverage)
 11. [Data Quality and Null Semantics](#11-data-quality-and-null-semantics)
-12. [Database Migrations](#12-database-migrations)
-13. [Running Tests](#13-running-tests)
-14. [Code Quality](#14-code-quality)
-15. [Deployment](#15-deployment)
-16. [Observability](#16-observability)
-17. [Troubleshooting](#17-troubleshooting)
+12. [Database Access](#12-database-access)
+13. [Database Migrations](#13-database-migrations)
+14. [Running Tests](#14-running-tests)
+15. [Code Quality](#15-code-quality)
+16. [Deployment](#16-deployment)
+17. [Observability](#17-observability)
+18. [Troubleshooting](#18-troubleshooting)
 
 ---
 
@@ -210,12 +211,34 @@ docker compose --env-file .env.local logs -f api
 # Show last 100 lines then follow (useful on first start)
 docker compose --env-file .env.local logs -f --tail=100 api
 
-# All services at once
+# All services at once (api + worker + scheduler + redis + postgres)
 docker compose --env-file .env.local logs -f
+
+# Show last 200 lines across all services then follow
+docker compose --env-file .env.local logs -f --tail=200
 
 # Worker or scheduler
 docker compose --env-file .env.local logs -f worker
 docker compose --env-file .env.local logs -f scheduler
+
+# Infrastructure only
+docker compose --env-file .env.local logs -f redis postgres
+```
+
+### Dump logs without following
+
+```bash
+# All logs for the api service (since container start)
+docker compose --env-file .env.local logs api
+
+# Last N lines — no live tail
+docker compose --env-file .env.local logs --tail=500 api
+
+# With timestamps prefixed (useful for correlating across services)
+docker compose --env-file .env.local logs -t api
+
+# All services, last 50 lines each, with timestamps
+docker compose --env-file .env.local logs -t --tail=50
 ```
 
 ### Startup sequence to look for
@@ -593,7 +616,92 @@ Every dataset receives a `DataConfidenceScore` (DCS) in `[0, 95]` — never 100.
 
 ---
 
-## 12. Database Migrations
+## 12. Database Access
+
+### Open a psql session
+
+```bash
+# Interactive psql shell inside the postgres container
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds
+```
+
+Once inside `psql`, useful meta-commands:
+
+```sql
+\dt             -- list all tables
+\d equity_candle   -- describe a table (columns, types, constraints)
+\di             -- list all indexes
+\dn             -- list schemas
+\q              -- quit
+```
+
+### Common read queries
+
+```bash
+# List all tables
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "\dt"
+
+# Row counts for key tables
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT relname AS table, n_live_tup AS rows
+    FROM pg_stat_user_tables
+    ORDER BY n_live_tup DESC;"
+
+# Latest 10 NSE equity candles
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT instrument_id, time, open, high, low, close, volume
+    FROM equity_candle
+    ORDER BY time DESC
+    LIMIT 10;"
+
+# Candles for a specific symbol and date range
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT time, open, high, low, close, volume
+    FROM equity_candle
+    WHERE instrument_id = 'RELIANCE' AND interval_str = '1d'
+      AND time >= '2026-09-01'
+    ORDER BY time;"
+
+# Check applied Alembic migrations
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "SELECT * FROM alembic_version;"
+
+# Database size
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT pg_size_pretty(pg_database_size('mds')) AS db_size;"
+
+# Table sizes (largest first)
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT relname AS table,
+           pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+    FROM pg_catalog.pg_statio_user_tables
+    ORDER BY pg_total_relation_size(relid) DESC;"
+```
+
+### Connect from your local machine
+
+The `postgres` container exposes port **5444** on the host (mapped from 5432 inside):
+
+```bash
+# psql from your host (requires psql installed locally)
+psql -h localhost -p 5444 -U mds_user -d mds
+
+# Connection string format (e.g. for DBeaver, TablePlus, DataGrip)
+postgresql://mds_user:<POSTGRES_PASSWORD>@localhost:5444/mds
+```
+
+`POSTGRES_PASSWORD` is in your `.env.local`.
+
+---
+
+## 13. Database Migrations
 
 ```bash
 # Apply all pending migrations (run after first start and after upgrades)
@@ -622,19 +730,18 @@ APP_ENV=local alembic revision --autogenerate -m "my change"
 APP_ENV=local alembic downgrade -1
 ```
 
-### Optional: TimescaleDB hypertable
+### TimescaleDB hypertables
 
-If TimescaleDB is available in your PostgreSQL instance, convert the OHLCV table to a hypertable for better time-series query performance:
+TimescaleDB hypertable promotion is handled automatically by the Alembic migration `b1c2d3e4f5a6`. After running `alembic upgrade head` against a PostgreSQL instance with TimescaleDB installed, six tables become hypertables:
 
-```bash
-docker compose --env-file .env.local exec postgres \
-  psql -U mds_user -d mds \
-  -c "SELECT create_hypertable('candle_bar', 'time', if_not_exists => TRUE);"
-```
+- `equity_candle`, `futures_candle`, `options_candle` — 7-day chunks (OHLCV)
+- `market_tick`, `market_quote`, `option_greeks_snapshot` — 1-day chunks (live data)
+
+No manual DDL step is required. If TimescaleDB is not installed, the tables remain as plain PostgreSQL tables and all functionality is preserved — the migration uses `if_not_exists => TRUE` so it is safe to run against either setup.
 
 ---
 
-## 13. Running Tests
+## 14. Running Tests
 
 ### Unit tests (no infrastructure required)
 
@@ -683,7 +790,7 @@ APP_ENV=local pytest tests/unit/ \
 
 ---
 
-## 14. Code Quality
+## 15. Code Quality
 
 ```bash
 # Lint (checks style, imports, and type issues)
@@ -703,7 +810,7 @@ All three tools are pre-configured in `pyproject.toml`.
 
 ---
 
-## 15. Deployment
+## 16. Deployment
 
 ### Production Docker Compose
 
@@ -745,7 +852,7 @@ docker compose --env-file .env.production up -d --scale api=3
 
 ---
 
-## 16. Observability
+## 17. Observability
 
 | Signal | Endpoint / Method | Details |
 |---|---|---|
@@ -757,7 +864,7 @@ docker compose --env-file .env.production up -d --scale api=3
 
 ---
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 ### Container keeps restarting
 

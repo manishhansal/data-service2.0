@@ -12,6 +12,26 @@ Responsibilities
 - Live quote fetch (LTP + market data)
 - Broker analytics: PCR, OI buildup, gainers/losers (from SmartAPI)
 
+Multi-worker authentication
+-----------------------------
+Angel One TOTP codes are single-use within a 30-second window.  When
+uvicorn runs with --workers N, all N worker processes call authenticate()
+at startup, but only the first one succeeds — the others get HTTP 403
+because the TOTP has already been consumed.
+
+Fix: Redis-backed JWT sharing.
+  Key: ``mds:angel_one:jwt:<client_id>``
+  TTL: 6 hours (Angel One JWTs are valid for approximately 1 day, but
+       we refresh conservatively at 6h to stay well within the window).
+
+  Startup flow per worker:
+    1. Check Redis for an existing JWT.
+    2. If found, load it — skip TOTP login entirely.
+    3. If not found, acquire a Redis distributed lock, re-check, then
+       perform TOTP login and store the JWT in Redis.
+  This ensures exactly one TOTP login per 6-hour window regardless of
+  the number of workers.
+
 Rate limits
 -----------
 Angel One enforces a 3 req/s ceiling at the NSE proxy level.  The adapter
@@ -61,6 +81,7 @@ Requirements: 5.9, 19.7
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -123,6 +144,27 @@ _INTERVAL_MAP: dict[str, str] = {
 # Intervals permanently banned for Indian market data
 _BANNED_INTERVALS = frozenset({"3m"})
 
+# ---------------------------------------------------------------------------
+# Redis JWT sharing — prevents TOTP conflicts in multi-worker deployments
+# ---------------------------------------------------------------------------
+
+#: Redis key for the shared JWT token (keyed by client_id at runtime).
+#: Format: ``mds:angel_one:jwt:{client_id}``
+_REDIS_JWT_KEY_TEMPLATE = "mds:angel_one:jwt:{client_id}"
+
+#: Redis key for the distributed auth lock (prevents simultaneous logins).
+_REDIS_AUTH_LOCK_TEMPLATE = "mds:angel_one:auth_lock:{client_id}"
+
+#: How long to store the JWT in Redis (seconds). Angel One JWTs are valid
+#: for ~24 hours; we refresh after 6 hours to stay safely within window.
+_JWT_REDIS_TTL_SEC = 6 * 3600  # 6 hours
+
+#: How long to hold the distributed auth lock while performing login (seconds).
+_AUTH_LOCK_TTL_SEC = 15
+
+#: How long to wait to acquire the auth lock before giving up (seconds).
+_AUTH_LOCK_WAIT_SEC = 20
+
 
 # ---------------------------------------------------------------------------
 # AngelOneAdapter
@@ -160,6 +202,7 @@ class AngelOneAdapter:
         *,
         mpin: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
+        redis_client: Optional[Any] = None,
     ) -> None:
         # Credentials are stored in private attributes and never echoed
         self._api_key = api_key
@@ -174,6 +217,11 @@ class AngelOneAdapter:
 
         self._http_client = http_client
         self._owns_client = http_client is None  # True → we created it, we close it
+
+        # Optional Redis client for cross-worker JWT sharing.
+        # When set, authenticate() reads/writes the JWT via Redis so that
+        # only one worker per 6-hour window performs the TOTP login.
+        self._redis: Optional[Any] = redis_client
 
         # JWT token state
         self._access_token: Optional[str] = None
@@ -222,11 +270,72 @@ class AngelOneAdapter:
     # Authentication                                                           #
     # ---------------------------------------------------------------------- #
 
+    async def _load_jwt_from_redis(self) -> bool:
+        """Try to load a valid JWT from Redis.
+
+        Returns True if a token was found and loaded, False otherwise.
+        """
+        if self._redis is None:
+            return False
+        try:
+            redis_key = _REDIS_JWT_KEY_TEMPLATE.format(client_id=self._client_id)
+            raw = await self._redis.get(redis_key)
+            if raw:
+                data = _json.loads(raw)
+                token = data.get("access_token")
+                if token:
+                    self._access_token = token
+                    self._refresh_token = data.get("refresh_token")
+                    self._token_acquired_at = time.monotonic()
+                    logger.info(
+                        "angel_one_jwt_loaded_from_redis",
+                        component="angel_one_adapter",
+                        provider=_PROVIDER_NAME,
+                    )
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "angel_one_redis_jwt_read_failed",
+                component="angel_one_adapter",
+                error=str(exc),
+            )
+        return False
+
+    async def _store_jwt_in_redis(self) -> None:
+        """Persist the current JWT to Redis for cross-worker sharing."""
+        if self._redis is None or not self._access_token:
+            return
+        try:
+            redis_key = _REDIS_JWT_KEY_TEMPLATE.format(client_id=self._client_id)
+            payload = _json.dumps({
+                "access_token": self._access_token,
+                "refresh_token": self._refresh_token or "",
+                "stored_at": _utc_iso_now(),
+            })
+            await self._redis.set(redis_key, payload, ex=_JWT_REDIS_TTL_SEC)
+            logger.info(
+                "angel_one_jwt_stored_in_redis",
+                component="angel_one_adapter",
+                provider=_PROVIDER_NAME,
+                ttl_sec=_JWT_REDIS_TTL_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "angel_one_redis_jwt_write_failed",
+                component="angel_one_adapter",
+                error=str(exc),
+            )
+
     async def authenticate(self) -> None:
         """Authenticate with Angel One SmartAPI using TOTP + password flow.
 
+        Multi-worker safe: uses a Redis distributed lock so that only one
+        worker performs the TOTP login at a time.  Other workers wait for the
+        lock to release, then read the JWT from Redis (stored by the winner).
+
         Generates a fresh TOTP code from the seed, calls the SmartAPI login
-        endpoint, and stores the returned JWT access token + refresh token.
+        endpoint, and stores the returned JWT access token + refresh token
+        both in-process and in Redis.
 
         This method should not be called concurrently; callers should use
         ``ensure_authenticated()`` which acquires the auth lock.
@@ -236,6 +345,46 @@ class AngelOneAdapter:
                                       or an error code in the response body.
             ProviderUnavailableError: Network or HTTP 5xx failure.
         """
+        # ── Distributed lock (Redis) — prevents simultaneous TOTP logins ──
+        lock_key = _REDIS_AUTH_LOCK_TEMPLATE.format(client_id=self._client_id)
+        acquired_lock = False
+
+        if self._redis is not None:
+            try:
+                # SET NX EX — atomic acquire; returns True if we got the lock
+                acquired_lock = await self._redis.set(
+                    lock_key, "1", nx=True, ex=_AUTH_LOCK_TTL_SEC
+                )
+                if not acquired_lock:
+                    # Another worker is authenticating; wait then read their token
+                    waited = 0.0
+                    while waited < _AUTH_LOCK_WAIT_SEC:
+                        await asyncio.sleep(0.5)
+                        waited += 0.5
+                        if await self._load_jwt_from_redis():
+                            logger.info(
+                                "angel_one_jwt_acquired_after_lock_wait",
+                                component="angel_one_adapter",
+                                provider=_PROVIDER_NAME,
+                            )
+                            return
+                    # Lock holder may have crashed — proceed with our own login
+                    logger.warning(
+                        "angel_one_auth_lock_wait_timeout",
+                        component="angel_one_adapter",
+                        provider=_PROVIDER_NAME,
+                        waited_sec=waited,
+                        note="Proceeding with TOTP login anyway",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "angel_one_redis_lock_failed",
+                    component="angel_one_adapter",
+                    error=str(exc),
+                    note="Falling through to direct TOTP login",
+                )
+
+        # ── TOTP login ────────────────────────────────────────────────────
         totp_code = pyotp.TOTP(self._totp_secret).now()
 
         payload = {
@@ -323,25 +472,47 @@ class AngelOneAdapter:
             # NEVER log the token value
         )
 
+        # ── Store JWT in Redis so other workers can reuse it ──────────────
+        await self._store_jwt_in_redis()
+
+        # ── Release the distributed auth lock ────────────────────────────
+        if acquired_lock and self._redis is not None:
+            try:
+                await self._redis.delete(lock_key)
+            except Exception:  # noqa: BLE001
+                pass  # Lock will expire on its own via TTL
+
     async def ensure_authenticated(self) -> None:
-        """Ensure the adapter holds a valid JWT token, re-authenticating if needed.
+        """Ensure the adapter holds a valid JWT token.
+
+        Priority order (multi-worker safe):
+          1. In-process token already present → use it.
+          2. Redis has a cached token from another worker → load it.
+          3. Neither found → acquire Redis distributed lock → TOTP login.
 
         This method is safe to call from multiple concurrent tasks — it
-        acquires an internal lock so only one authentication attempt runs at
-        a time.
+        acquires an in-process lock so only one authentication attempt runs
+        at a time within this process.
 
         Raises:
             ProviderAuthError:        Authentication failed.
             ProviderUnavailableError: Network failure during auth.
         """
         async with self._auth_lock:
-            if self._access_token is None:
-                await self.authenticate()
+            # Fast path: already authenticated in this process
+            if self._access_token is not None:
+                return
+            # Try Redis first — avoids consuming a new TOTP code
+            if await self._load_jwt_from_redis():
+                return
+            # Full TOTP login (handles Redis lock internally)
+            await self.authenticate()
 
     async def rotate_token(self) -> None:
         """Force a full token rotation (used by the 23:55 IST scheduler).
 
-        Discards the current token and performs a fresh login.
+        Discards the current token, clears the Redis cache, and performs a
+        fresh TOTP login.
 
         Raises:
             ProviderAuthError:        Re-authentication failed.
@@ -351,6 +522,15 @@ class AngelOneAdapter:
             self._access_token = None
             self._refresh_token = None
             self._token_acquired_at = None
+            # Clear Redis so other workers pick up the new token
+            if self._redis is not None:
+                try:
+                    redis_key = _REDIS_JWT_KEY_TEMPLATE.format(
+                        client_id=self._client_id
+                    )
+                    await self._redis.delete(redis_key)
+                except Exception:  # noqa: BLE001
+                    pass
             await self.authenticate()
             logger.info(
                 "angel_one_token_rotated",

@@ -610,10 +610,12 @@ class ValidationPipeline:
     def _step_persist(
         self, dataset: dict
     ) -> tuple[dict, bool, Optional[DataIncident]]:
-        """Step 13: Persist to L3 PostgreSQL.
+        """Step 13: Persist to L3 PostgreSQL canonical tables.
 
-        Real implementation (Task 2.1+): bulk-upserts candle_bar rows,
+        Real implementation (Task 2.1+): bulk-upserts into equity_candle /
+        futures_candle / options_candle (routing by instrument_class),
         writes data_provenance record within 1000ms.
+        candle_bar is archive-only — never written here.
 
         Requirements: 8.6, 4.5
         """

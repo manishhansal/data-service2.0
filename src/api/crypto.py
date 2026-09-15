@@ -405,7 +405,11 @@ def _normalize_binance_symbol(symbol: str) -> str:
         _normalize_binance_symbol("ETHBTC")  -> "ETHBTC"
     """
     upper = symbol.upper()
-    if any(upper.endswith(q) for q in _KNOWN_QUOTE_CURRENCIES):
+    # Require at least one character before the quote suffix so that bare
+    # quote-currency names like "BTC" or "ETH" are not mistakenly treated as
+    # already-complete trading pairs (they would be, e.g., "ETHBTC" or "XRPETH"
+    # where the quote portion is preceded by a base asset).
+    if any(upper.endswith(q) and len(upper) > len(q) for q in _KNOWN_QUOTE_CURRENCIES):
         return upper
     return upper + _DEFAULT_QUOTE_CURRENCY
 

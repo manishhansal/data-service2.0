@@ -290,7 +290,9 @@ class TestCondition3TimestampAndOHLCV:
 
     def test_future_timestamp_fails(self) -> None:
         """A timestamp more than 1 minute in the future must fail."""
-        future_ts = _NOW_MS + 120_000  # 2 minutes ahead
+        # Use time.time() at test execution rather than module-level _NOW_MS to
+        # avoid flakiness when the full test suite takes > 2 minutes to run.
+        future_ts = int(time.time() * 1000) + 120_000  # 2 minutes ahead
         data = _valid_data(timestamp=future_ts, eventTimeMs=future_ts)
         gate = DataQualityGate.evaluate(data)
         assert gate.dataTimestampValid is False

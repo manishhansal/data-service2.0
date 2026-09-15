@@ -91,6 +91,9 @@ logs/
 *.sqlite
 *.sqlite3
 
+# Database dumps and migration backups (large binary files — never commit)
+backups/
+
 # ── Alembic ───────────────────────────────────────────────────────────────────
 # Keep versions/ scripts, ignore compiled cache inside them
 alembic/versions/__pycache__/

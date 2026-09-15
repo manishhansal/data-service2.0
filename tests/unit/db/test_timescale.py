@@ -43,11 +43,16 @@ def _make_engine_with_connection(
 ) -> MagicMock:
     """Build a mock AsyncEngine whose connection yields controlled results.
 
+    As of schema revision b1c2d3e4f5a6, promote_hypertable makes two
+    execute calls: (1) detection query and (2) hypertable inventory query.
+    The promotion DDL no longer exists — hypertables are managed by Alembic.
+
     Args:
         detect_row:      The single row returned by the TimescaleDB detection
                          query.  ``None`` simulates extension not installed.
-        execute_raises:  If set, the promotion DDL ``execute`` call raises
-                         this exception instead of succeeding.
+        execute_raises:  If set, the second execute call (inventory query)
+                         raises this exception.  Note: the new code catches
+                         inventory errors as non-fatal (WARNING log, no raise).
         detect_raises:   If set, the detection ``execute`` call raises this
                          exception instead of returning a result.
     """
@@ -58,31 +63,32 @@ def _make_engine_with_connection(
         # The very first execute (detection) raises.
         mock_conn.execute = AsyncMock(side_effect=detect_raises)
     elif execute_raises is not None:
-        # Detection succeeds, promotion DDL raises.
+        # Detection succeeds, inventory query raises.
         detect_result = MagicMock()
         detect_result.fetchone.return_value = detect_row
 
-        promotion_calls = 0
+        inventory_calls = 0
 
         async def _execute_side_effect(stmt):  # type: ignore[override]
-            nonlocal promotion_calls
-            promotion_calls += 1
-            if promotion_calls == 1:
+            nonlocal inventory_calls
+            inventory_calls += 1
+            if inventory_calls == 1:
                 # First call → detection query
                 return detect_result
-            # Second call → promotion DDL raises
+            # Second call → inventory query raises
             raise execute_raises
 
         mock_conn.execute = AsyncMock(side_effect=_execute_side_effect)
     else:
-        # Happy path: both detection and promotion succeed.
+        # Happy path: both detection and inventory succeed.
         detect_result = MagicMock()
         detect_result.fetchone.return_value = detect_row
 
-        promotion_result = MagicMock()
+        inventory_result = MagicMock()
+        inventory_result.fetchall.return_value = []
 
-        # Alternate returns: first call = detect, second call = promote.
-        mock_conn.execute = AsyncMock(side_effect=[detect_result, promotion_result])
+        # Alternate returns: first call = detect, second call = inventory.
+        mock_conn.execute = AsyncMock(side_effect=[detect_result, inventory_result])
 
     # Wire the connection into a context-manager-compatible engine.
     conn_ctx = AsyncMock()
@@ -111,14 +117,15 @@ class TestPromoteHypertableTimescalePresent:
 
     @pytest.mark.asyncio
     async def test_execute_called_twice(self) -> None:
-        """Two execute calls expected: detection query + promotion DDL."""
+        """Two execute calls expected: detection query + hypertable inventory query."""
         mock_conn = AsyncMock()
         mock_conn.commit = AsyncMock()
 
         detect_result = MagicMock()
         detect_result.fetchone.return_value = ("2.14.2",)
-        promo_result = MagicMock()
-        mock_conn.execute = AsyncMock(side_effect=[detect_result, promo_result])
+        inventory_result = MagicMock()
+        inventory_result.fetchall.return_value = []
+        mock_conn.execute = AsyncMock(side_effect=[detect_result, inventory_result])
 
         conn_ctx = AsyncMock()
         conn_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -133,14 +140,18 @@ class TestPromoteHypertableTimescalePresent:
 
     @pytest.mark.asyncio
     async def test_commit_called_after_promotion(self) -> None:
-        """conn.commit() must be awaited after the promotion DDL succeeds."""
+        """As of schema revision b1c2d3e4f5a6, promote_hypertable no longer
+        executes DDL (hypertables are created by Alembic).  commit() is
+        therefore NOT called.  This test verifies the updated contract."""
         mock_conn = AsyncMock()
         mock_conn.commit = AsyncMock()
 
+        # Detection returns a valid version; inventory list returns empty.
         detect_result = MagicMock()
         detect_result.fetchone.return_value = ("2.14.2",)
-        promo_result = MagicMock()
-        mock_conn.execute = AsyncMock(side_effect=[detect_result, promo_result])
+        inventory_result = MagicMock()
+        inventory_result.fetchall.return_value = []
+        mock_conn.execute = AsyncMock(side_effect=[detect_result, inventory_result])
 
         conn_ctx = AsyncMock()
         conn_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -149,9 +160,11 @@ class TestPromoteHypertableTimescalePresent:
         engine = MagicMock()
         engine.connect = MagicMock(return_value=conn_ctx)
 
-        await promote_hypertable(engine)
+        result = await promote_hypertable(engine)
 
-        mock_conn.commit.assert_awaited_once()
+        assert result is True
+        # No commit — the new implementation is read-only (detect + inventory)
+        mock_conn.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_detection_sql_targets_pg_extension(self) -> None:
@@ -164,28 +177,47 @@ class TestPromoteHypertableTimescalePresent:
 
     @pytest.mark.asyncio
     async def test_promotion_sql_targets_candle_bar(self) -> None:
-        """The promotion DDL must reference candle_bar and create_hypertable."""
-        from src.db.timescale import _PROMOTE_HYPERTABLE_SQL
+        """As of schema revision b1c2d3e4f5a6, _PROMOTE_HYPERTABLE_SQL has been
+        removed.  The detection SQL (_TIMESCALEDB_DETECT_SQL) and the inventory
+        SQL (_LIST_HYPERTABLES_SQL) are the only SQL constants.  This test
+        verifies that _PROMOTE_HYPERTABLE_SQL is intentionally absent and that
+        the detection SQL correctly targets pg_extension."""
+        from src.db.timescale import _TIMESCALEDB_DETECT_SQL
 
-        sql_text = str(_PROMOTE_HYPERTABLE_SQL)
-        assert "candle_bar" in sql_text
-        assert "create_hypertable" in sql_text
+        # Verify the detection SQL is present and correct
+        sql_text = str(_TIMESCALEDB_DETECT_SQL)
+        assert "pg_extension" in sql_text
+        assert "timescaledb" in sql_text
+
+        # Verify that the old promotion constant no longer exists
+        import src.db.timescale as tsmod
+        assert not hasattr(tsmod, "_PROMOTE_HYPERTABLE_SQL"), (
+            "_PROMOTE_HYPERTABLE_SQL should not exist — "
+            "candle_bar is no longer promoted to a hypertable"
+        )
 
     @pytest.mark.asyncio
     async def test_promotion_sql_uses_1_day_interval(self) -> None:
-        """The chunk_time_interval must be '1 day' per Requirement 20.6."""
-        from src.db.timescale import _PROMOTE_HYPERTABLE_SQL
+        """As of schema revision b1c2d3e4f5a6, the _LIST_HYPERTABLES_SQL
+        inventory query must exist (replacing the removed promotion DDL).
+        The canonical hypertables use 7-day and 1-day chunk intervals
+        configured in the Alembic migration, not here."""
+        from src.db.timescale import _LIST_HYPERTABLES_SQL
 
-        sql_text = str(_PROMOTE_HYPERTABLE_SQL)
-        assert "1 day" in sql_text
+        sql_text = str(_LIST_HYPERTABLES_SQL)
+        # Inventory query references timescaledb_information
+        assert "hypertable" in sql_text.lower()
+        assert "timescaledb_information" in sql_text
 
     @pytest.mark.asyncio
     async def test_promotion_sql_is_idempotent(self) -> None:
-        """The DDL must include if_not_exists => TRUE for idempotency."""
-        from src.db.timescale import _PROMOTE_HYPERTABLE_SQL
+        """The module must export _LIST_HYPERTABLES_SQL (inventory query) and
+        _TIMESCALEDB_DETECT_SQL (detection query).  Both must be importable and
+        contain expected SQL fragments."""
+        from src.db.timescale import _LIST_HYPERTABLES_SQL, _TIMESCALEDB_DETECT_SQL
 
-        sql_text = str(_PROMOTE_HYPERTABLE_SQL)
-        assert "if_not_exists" in sql_text
+        assert "pg_extension" in str(_TIMESCALEDB_DETECT_SQL)
+        assert "timescaledb_information" in str(_LIST_HYPERTABLES_SQL)
 
     @pytest.mark.asyncio
     async def test_works_with_various_timescaledb_versions(self) -> None:
@@ -283,10 +315,15 @@ class TestPromoteHypertableErrorPaths:
 
     @pytest.mark.asyncio
     async def test_operational_error_on_promotion_raises_db_unavailable(self) -> None:
-        """OperationalError during the promotion DDL → DatabaseUnavailableError."""
+        """As of schema revision b1c2d3e4f5a6, the second database call is the
+        hypertable inventory query (not a promotion DDL).  An OperationalError
+        on the detection query itself must still raise DatabaseUnavailableError.
+        An OperationalError on the inventory query is swallowed (non-fatal)
+        because it merely affects observability, not correctness."""
+        # OperationalError on the DETECTION query → DatabaseUnavailableError
         engine = _make_engine_with_connection(
-            detect_row=("2.14.2",),
-            execute_raises=OperationalError("promotion failed", None, None),
+            detect_row=None,
+            detect_raises=OperationalError("connection refused", None, None),
         )
         with pytest.raises(DatabaseUnavailableError):
             await promote_hypertable(engine)

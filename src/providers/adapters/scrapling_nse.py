@@ -14,30 +14,28 @@ Responsibilities
 HTTP strategy
 -------------
 ``curl_cffi`` is used for all outbound HTTP calls with Chrome TLS-fingerprint
-impersonation to bypass NSE's WAF.  ``scrapling.Selector`` is used if any
-response requires HTML parsing (the NSE charting endpoints return JSON, but
-some legacy instrument-master paths return HTML-wrapped data).
+impersonation (Chrome 131) to bypass NSE's Akamai WAF.
 
-Normalisation is **not** done here.  The adapter returns raw dicts; the
-Validation Pipeline's Normaliser (task 5.2) maps them to canonical schemas.
+NSE WAF behavior (as of Sep 2026)
+-----------------------------------
+NSE uses Akamai Bot Manager with both TLS fingerprinting AND JavaScript
+challenges.  The following endpoints are accessible without JS execution:
+  - ``/api/marketStatus``   — market open/closed status ✅
+  - ``/api/allIndices``     — all index live data (NIFTY, BANKNIFTY, etc.) ✅
 
-Rate limits
------------
-NSE blocks aggressive crawlers.  The adapter enforces a token-bucket at
-2 req/s, consistent with the Capability_Matrix entry for ``scrapling_nse``
-(Requirement 5.1).  A small jitter is added between consecutive calls to
-avoid patterns that trigger WAF rules.
+The following endpoints require ``nseappid`` / ``nsit`` cookies that are set
+by Akamai's JavaScript challenge and are NOT obtainable without a real browser
+or JS engine:
+  - ``/api/quote-equity``         — equity live quotes ❌ (requires JS cookies)
+  - ``/api/option-chain-indices`` — option chain ❌ (moved/removed)
+  - ``/api/quote-derivative``     — F&O quotes ❌ (requires JS cookies)
 
-Error mapping
--------------
-| HTTP status | Exception raised               | Notes                          |
-|-------------|-------------------------------|--------------------------------|
-| 403         | ProviderAuthError             | WAF block / geo restriction    |
-| 429         | ProviderRateLimitedError      | Retry-After header honoured    |
-| 503 / 5xx   | ProviderUnavailableError      | Temporary upstream failure     |
-| conn. error | ProviderUnavailableError      | Timeout, DNS failure, etc.     |
-| bad JSON    | ProviderDataError             | Malformed response body        |
-| empty data  | ProviderMarketClosedError     | Closed-market empty payload    |
+Strategy:
+  1. ``allIndices`` gives live prices for all 139+ NSE indices (NIFTY, BANKNIFTY,
+     FINNIFTY, etc.) without JS.  Index quotes are served from this endpoint.
+  2. For equity quotes, we fall through to a 403 with a clear error.
+  3. Session warm-up (homepage + option-chain page) is kept to maximize
+     the chance that future NSE endpoint changes are handled gracefully.
 
 Requirements: 5.9, 22.1
 """
@@ -75,22 +73,29 @@ _PROVIDER_NAME = "scrapling_nse"
 _NSE_BASE_URL = "https://www.nseindia.com"
 
 # NSE quote endpoint — returns LTP, OHLC, circuit limits, etc.
+# NOTE: As of Sep 2026, this requires Akamai JS-challenge cookies (nseappid).
+# Returns HTTP 403 without a real browser session.
 _QUOTE_URL = f"{_NSE_BASE_URL}/api/quote-equity"
 
-# NSE F&O quote endpoint (derivatives)
+# NSE F&O quote endpoint (derivatives) — same JS-challenge restriction
 _QUOTE_DERIV_URL = f"{_NSE_BASE_URL}/api/quote-derivative"
 
-# NSE option chain endpoint
+# NSE option chain endpoints — moved/removed as of Sep 2026
 _OPTION_CHAIN_URL = f"{_NSE_BASE_URL}/api/option-chain-indices"
-
-# NSE equity option chain endpoint (for stock options)
 _OPTION_CHAIN_EQUITIES_URL = f"{_NSE_BASE_URL}/api/option-chain-equities"
+
+# Working endpoints (no JS challenge required) ─────────────────────────────
+
+# All indices live data — returns NIFTY 50, NIFTY BANK, FINNIFTY, etc.
+# This endpoint returns live prices for 139+ indices without JS cookies.
+# Also used in fetch_instrument_master() to populate the IDX instrument list.
+_ALL_INDICES_URL = f"{_NSE_BASE_URL}/api/allIndices"
+
+# Market status — always accessible
+_MARKET_STATUS_URL = f"{_NSE_BASE_URL}/api/marketStatus"
 
 # NSE all-equity CSV / JSON listing used to bootstrap the instrument master
 _EQUITY_MASTER_URL = f"{_NSE_BASE_URL}/api/master-quote"
-
-# Indices listing — used to populate IDX instruments
-_INDICES_URL = f"{_NSE_BASE_URL}/api/allIndices"
 
 # F&O ban list — used to identify derivative instruments
 _FNO_BAN_URL = f"{_NSE_BASE_URL}/api/live-analysis-data?index=foBanList"
@@ -98,6 +103,9 @@ _FNO_BAN_URL = f"{_NSE_BASE_URL}/api/live-analysis-data?index=foBanList"
 # Seed URL — NSE requires a valid session cookie obtained from the homepage
 # before hitting JSON endpoints; a GET to the homepage seeds the cookie jar.
 _NSE_HOMEPAGE_URL = f"{_NSE_BASE_URL}/"
+
+# Option chain page — visiting this warms up the session for option data
+_NSE_OC_PAGE_URL = f"{_NSE_BASE_URL}/option-chain"
 
 # ---------------------------------------------------------------------------
 # Browser-like headers
@@ -110,12 +118,15 @@ NSE_HEADERS: dict[str, str] = {
         "application/signed-exchange;v=b3;q=0.7"
     ),
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
     "DNT": "1",
     "Pragma": "no-cache",
     "Referer": "https://www.nseindia.com/",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "same-origin",
@@ -130,11 +141,21 @@ NSE_HEADERS: dict[str, str] = {
 
 # JSON-specific headers used after the session cookie is seeded
 NSE_JSON_HEADERS: dict[str, str] = {
-    **NSE_HEADERS,
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Referer": "https://www.nseindia.com/",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
-    "X-Requested-With": "XMLHttpRequest",
+    "Sec-Fetch-Site": "same-origin",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -221,43 +242,72 @@ class ScraplingNseAdapter:
         return self._session
 
     async def _ensure_seeded(self) -> None:
-        """Fetch the NSE homepage once to obtain a valid session cookie.
+        """Fetch the NSE homepage and option-chain page to obtain session cookies.
 
-        NSE's JSON endpoints reject requests that lack a valid ``nsit`` /
-        ``nseappid`` cookie.  A single GET to the homepage populates the
-        cookie jar for the lifetime of the session.
+        NSE uses Akamai Bot Manager.  A multi-step warm-up is required:
+          1. Homepage GET (seeds _abck, ak_bmsc, bm_sz Akamai cookies)
+          2. Option-chain page GET (seeds bm_sv, bm_mi cookies)
+
+        Even with these cookies, the ``quote-equity`` endpoint returns 403
+        because it additionally requires the ``nseappid`` cookie that is set
+        by Akamai's JavaScript challenge (unavailable without a real browser).
+
+        The warm-up remains valuable because it maximises the chance of
+        accessing other endpoints (allIndices, marketStatus) that do not
+        require the JS cookie.
         """
         if self._session_seeded:
             return
         session = await self._get_session()
+        html_headers = {
+            **NSE_JSON_HEADERS,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        html_headers.pop("X-Requested-With", None)
+
+        # Step 1: Homepage (Akamai sets _abck, ak_bmsc, bm_sz)
         try:
-            resp = await session.get(
+            resp1 = await session.get(
                 _NSE_HOMEPAGE_URL,
-                headers=NSE_HEADERS,
+                headers=html_headers,
                 timeout=self._connect_timeout + self._read_timeout,
             )
-            if resp.status_code < 500:
-                self._session_seeded = True
+            if resp1.status_code < 500:
                 logger.debug(
-                    "nse_session_seeded",
+                    "nse_homepage_seeded",
                     component=_PROVIDER_NAME,
-                    status_code=resp.status_code,
-                )
-            else:
-                logger.warning(
-                    "nse_session_seed_failed",
-                    component=_PROVIDER_NAME,
-                    status_code=resp.status_code,
+                    status_code=resp1.status_code,
+                    cookie_count=len(session.cookies),
                 )
         except Exception as exc:
-            logger.warning(
-                "nse_session_seed_error",
-                component=_PROVIDER_NAME,
-                error=str(exc),
+            logger.warning("nse_homepage_seed_error", component=_PROVIDER_NAME, error=str(exc))
+
+        # Step 2: Option-chain page (adds bm_sv, bm_mi cookies)
+        await asyncio.sleep(1.2)
+        try:
+            nav_headers = {**html_headers, "Sec-Fetch-Site": "same-origin",
+                           "Referer": _NSE_HOMEPAGE_URL}
+            await session.get(
+                _NSE_OC_PAGE_URL,
+                headers=nav_headers,
+                timeout=self._connect_timeout + self._read_timeout,
             )
-            # Not fatal — some environments can reach JSON endpoints without
-            # an explicit cookie; proceed and let the actual request fail if
-            # needed.
+        except Exception as exc:
+            logger.debug("nse_oc_page_seed_error", component=_PROVIDER_NAME, error=str(exc))
+
+        await asyncio.sleep(0.8)
+        self._session_seeded = True
+        logger.info(
+            "nse_session_seeded",
+            component=_PROVIDER_NAME,
+            cookie_count=len(session.cookies),
+            cookie_names=list(session.cookies.keys()),
+        )
 
     async def close(self) -> None:
         """Close the underlying HTTP session and release resources."""
@@ -456,6 +506,45 @@ class ScraplingNseAdapter:
     # Public API
     # ------------------------------------------------------------------ #
 
+    async def fetch_all_indices(self) -> dict[str, dict]:
+        """Fetch live data for all NSE indices from /api/allIndices.
+
+        This endpoint is accessible without Akamai JS cookies and returns
+        live prices for 139+ indices including NIFTY 50, NIFTY BANK,
+        FINNIFTY, NIFTY IT, MIDCPNIFTY, INDIA VIX, etc.
+
+        Returns:
+            Dict keyed by index name → raw index dict.
+            Each dict contains: ``last`` (LTP), ``percentChange``,
+            ``open``, ``high``, ``low``, ``previousClose``, ``yearHigh``,
+            ``yearLow``, ``pe``, ``advance``, ``decline``, ``unchanged``.
+
+        Raises:
+            ProviderUnavailableError: Network or HTTP error.
+            ProviderDataError:        Malformed response.
+        """
+        data = await self._get(_ALL_INDICES_URL)
+        indices_list = data.get("data", [])
+        if not isinstance(indices_list, list):
+            raise ProviderDataError(
+                "NSE allIndices response 'data' is not a list",
+                provider=_PROVIDER_NAME,
+            )
+        result: dict[str, dict] = {}
+        for entry in indices_list:
+            name = entry.get("index") or entry.get("indexSymbol", "")
+            if name:
+                entry["_sourceType"] = SourceType.OPEN_SOURCE_NSE_DERIVED.value
+                entry["_provider"] = _PROVIDER_NAME
+                result[name] = entry
+
+        logger.debug(
+            "nse_all_indices_received",
+            component=_PROVIDER_NAME,
+            count=len(result),
+        )
+        return result
+
     async def fetch_live_quote(
         self,
         symbol: str,
@@ -463,31 +552,114 @@ class ScraplingNseAdapter:
     ) -> dict[str, Any]:
         """Fetch a live quote for an NSE equity or derivative instrument.
 
-        Routes the request to the correct NSE endpoint based on ``exchange``:
-        - ``NSE`` / equity → ``/api/quote-equity?symbol=<SYMBOL>``
-        - ``NFO`` / derivatives → ``/api/quote-derivative?symbol=<SYMBOL>``
+        Routing:
+        - Index symbols (NIFTY, BANKNIFTY, FINNIFTY, etc.) → ``/api/allIndices``
+          This works reliably without JS cookies.
+        - Equity symbols → ``/api/quote-equity`` (requires Akamai JS cookies;
+          returns HTTP 403 without a real browser session as of Sep 2026).
+        - NFO symbols → ``/api/quote-derivative`` (same JS restriction).
 
-        The returned dict is the raw NSE JSON payload.  Fields include (but
-        are not limited to): ``priceInfo`` (ltp, open, high, low, pChange,
-        totalTradedVolume), ``securityWiseDP`` (upper/lower circuit), and
-        ``metadata`` (instrumentType, isin).
+        The returned dict is the raw NSE JSON payload.
 
         Args:
-            symbol:   NSE trading symbol, e.g. ``"NIFTY"`` or ``"RELIANCE"``.
-            exchange: Exchange code — ``"NSE"`` for equities/indices,
-                      ``"NFO"`` for F&O instruments.
+            symbol:   NSE trading symbol.
+            exchange: ``"NSE"`` for equities/indices, ``"NFO"`` for F&O.
 
         Returns:
-            Raw quote dict from NSE.
+            Raw quote dict with ``priceInfo`` for equities/indices or the
+            raw allIndices entry for index symbols.
 
         Raises:
-            ProviderAuthError:         HTTP 403 (WAF block).
+            ProviderAuthError:         HTTP 403 (WAF block — JS cookies needed).
             ProviderRateLimitedError:  HTTP 429.
             ProviderUnavailableError:  HTTP 5xx or connection error.
             ProviderDataError:         Non-JSON or empty response.
             ProviderMarketClosedError: NSE returns an empty/closed payload.
         """
         exchange_upper = exchange.upper()
+        symbol_upper = symbol.upper()
+
+        # ── Index fast path via allIndices (no JS cookies needed) ────────
+        # Map common trading symbols to allIndices "index" field names
+        _INDEX_SYMBOL_MAP: dict[str, str] = {
+            "NIFTY":       "NIFTY 50",
+            "NIFTY50":     "NIFTY 50",
+            "NIFTY 50":    "NIFTY 50",
+            "BANKNIFTY":   "NIFTY BANK",
+            "NIFTY BANK":  "NIFTY BANK",
+            "FINNIFTY":    "NIFTY FINANCIAL SERVICES",
+            "NIFTY FIN SERVICE": "NIFTY FINANCIAL SERVICES",
+            "MIDCPNIFTY":  "NIFTY MIDCAP SELECT",
+            "NIFTY MIDCAP SELECT": "NIFTY MIDCAP SELECT",
+            "NIFTYNXT50":  "NIFTY NEXT 50",
+            "NIFTY NEXT 50": "NIFTY NEXT 50",
+            "INDIAVIX":    "INDIA VIX",
+            "INDIA VIX":   "INDIA VIX",
+            "NIFTY IT":    "NIFTY IT",
+            "NIFTYIT":     "NIFTY IT",
+            "NIFTY AUTO":  "NIFTY AUTO",
+            "NIFTYAUTO":   "NIFTY AUTO",
+            "NIFTY FMCG":  "NIFTY FMCG",
+            "NIFTYFMCG":   "NIFTY FMCG",
+            "NIFTY PHARMA": "NIFTY PHARMA",
+            "NIFTY REALTY": "NIFTY REALTY",
+            "NIFTY METAL":  "NIFTY METAL",
+            "NIFTY PSU BANK": "NIFTY PSU BANK",
+            "NIFTY ENERGY": "NIFTY ENERGY",
+            "NIFTY INFRA":  "NIFTY INDIA CONSUMPTION",
+        }
+        index_name = _INDEX_SYMBOL_MAP.get(symbol_upper)
+
+        if index_name or symbol_upper in _INDEX_UNDERLYINGS:
+            lookup = index_name or f"NIFTY {symbol_upper}" if symbol_upper not in ("NIFTY 50",) else symbol_upper
+            all_indices = await self.fetch_all_indices()
+            entry = all_indices.get(lookup) or all_indices.get(symbol_upper)
+            # Fuzzy match: try partial name match
+            if entry is None:
+                for k, v in all_indices.items():
+                    if symbol_upper in k.upper() or k.upper() in symbol_upper:
+                        entry = v
+                        break
+            if entry is not None:
+                ltp = entry.get("last") or entry.get("lastPrice")
+                # Normalise to priceInfo shape so callers get consistent field names
+                result = {
+                    "priceInfo": {
+                        "lastPrice": ltp,
+                        "open": entry.get("open"),
+                        "high": entry.get("high"),
+                        "low": entry.get("low"),
+                        "previousClose": entry.get("previousClose"),
+                        "pChange": entry.get("percentChange"),
+                        "change": entry.get("change"),
+                        "totalTradedVolume": entry.get("totalTradedVolume") or 0,
+                        "yearHigh": entry.get("yearHigh"),
+                        "yearLow": entry.get("yearLow"),
+                    },
+                    "metadata": {
+                        "symbol": symbol_upper,
+                        "instrumentType": "INDEX",
+                        "indexName": lookup or symbol_upper,
+                    },
+                    "ltp": ltp,
+                    "_sourceType": SourceType.OPEN_SOURCE_NSE_DERIVED.value,
+                    "_provider": _PROVIDER_NAME,
+                    "_source": "allIndices",
+                }
+                logger.debug(
+                    "nse_index_quote_from_allIndices",
+                    component=_PROVIDER_NAME,
+                    symbol=symbol,
+                    ltp=ltp,
+                )
+                return result
+            # Index not found in allIndices
+            raise ProviderMarketClosedError(
+                f"Index {symbol!r} not found in NSE allIndices response",
+                provider=_PROVIDER_NAME,
+            )
+
+        # ── Equity / F&O path (requires Akamai JS cookies) ──────────────
         if exchange_upper == "NFO":
             url = _QUOTE_DERIV_URL
         else:
@@ -498,12 +670,11 @@ class ScraplingNseAdapter:
             component=_PROVIDER_NAME,
             symbol=symbol,
             exchange=exchange_upper,
+            note="equity/FNO quotes require Akamai JS cookies (nseappid); may get 403",
         )
 
         data = await self._get(url, params={"symbol": symbol})
 
-        # NSE returns {"info": {}, "metadata": {}, "priceInfo": {}, ...}
-        # An empty dict or a payload with no priceInfo indicates market closed.
         if not data or "priceInfo" not in data:
             logger.info(
                 "nse_market_closed_or_empty",
@@ -515,7 +686,6 @@ class ScraplingNseAdapter:
                 provider=_PROVIDER_NAME,
             )
 
-        # Attach source type metadata for the pipeline
         data["_sourceType"] = SourceType.OPEN_SOURCE_NSE_DERIVED.value
         data["_provider"] = _PROVIDER_NAME
 
@@ -659,7 +829,7 @@ class ScraplingNseAdapter:
 
         # ---- Index master --------------------------------------------------
         try:
-            idx_data = await self._get(_INDICES_URL)
+            idx_data = await self._get(_ALL_INDICES_URL)
             idx_list: list[dict[str, Any]] = []
 
             if isinstance(idx_data, list):

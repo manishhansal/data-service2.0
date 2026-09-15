@@ -595,7 +595,8 @@ class GapRecoveryEngine:
         In the full implementation, this will:
         1. Call the fallback provider adapter via the ProviderGateway.
         2. Run the validation pipeline on the fetched candles.
-        3. Bulk-upsert valid candles into ``candle_bar``.
+        3. Bulk-upsert valid candles into the canonical table (equity_candle /
+           futures_candle / options_candle) via HistoricalEngine.bulk_upsert_candles().
         4. Update the backfill checkpoint in Redis.
         5. Return ``True`` on success, ``False`` on failure.
         """

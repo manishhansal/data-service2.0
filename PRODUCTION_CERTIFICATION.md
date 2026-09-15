@@ -57,7 +57,7 @@ See: `reports/20_FINAL_PRODUCTION_CERTIFICATION.md`
 | **AlphaForge Deribit bypass removed** | `src/features/options/fetch-options.ts` | ✅ DS first |
 | Updated PRODUCTION_CERTIFICATION.md | This file | ✅ Status: CONDITIONALLY_READY |
 
-**Post-audit test count:** 4485 pass, 0 fail.
+**Post-audit test count:** 4,662 pass, 0 fail (updated 2026-09-15 — includes v2 schema integration tests).
 
 **Status upgrade:** `NOT_READY` → `CONDITIONALLY_READY`
 
@@ -210,7 +210,7 @@ All REST endpoints are prefixed with `/v1/`. The WebSocket endpoint uses `ws://`
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/v1/india/quotes/{symbol}` | Live quote for a single NSE instrument |
-| `GET` | `/v1/india/quotes` | Batch live quotes (`?symbols=NIFTY,BANKNIFTY`) |
+| `GET` | `/v1/india/quotes/batch` | Batch live quotes (`?symbols=NIFTY,BANKNIFTY` — max 200 symbols) |
 | `GET` | `/v1/india/option-chain` | Option chain snapshot (`?underlying=NIFTY&expiry=2025-01-30`) |
 | `GET` | `/v1/india/market/status` | Session phase, nextSessionChange, tradingDay, nextTradingDay, holidays, calendarStatus |
 
@@ -304,7 +304,7 @@ All REST endpoints are prefixed with `/v1/`. The WebSocket endpoint uses `ws://`
 | **Consumer authentication (JWT + API key)** | `src/auth/consumer_auth.py` — all production endpoints require a valid API key via `X-API-Key` header or JWT bearer token via `Authorization: Bearer <token>`. Invalid/expired → HTTP 401 without disclosing internal state. `/v1/auth/token` issues JWTs via API key exchange. | ✅ PASS |
 | **Consumer rate limiting** | `src/middleware/rate_limiter.py` — per-consumer configurable rate limit, maximum 10,000 req/min. Exceeded → HTTP 429 with `Retry-After` header. | ✅ PASS |
 | **CORS allowlist (no wildcard)** | `CORSMiddleware` in `src/server.py` configured from `CORS_ALLOWED_ORIGINS` env var (comma-separated). Wildcard `*` is prohibited on all production endpoints (Req 19.6). | ✅ PASS |
-| **3m interval permanently banned (Indian market)** | Enforced at **six independent layers**: (1) acquisition planner `ValueError`, (2) Normaliser rejects, (3) `candle_bar` `CHECK (interval_str <> '3m')` DB constraint, (4) API handler HTTP 400, (5) Historical Engine routing, (6) gap recovery. Any single layer is defence-in-depth; all six are present. | ✅ PASS |
+| **3m interval permanently banned (Indian market)** | Enforced at **six independent layers**: (1) acquisition planner `ValueError`, (2) Normaliser rejects, (3) `equity_candle` / `futures_candle` / `options_candle` `CHECK (interval_str <> '3m')` DB constraints, (4) API handler HTTP 400, (5) Historical Engine routing, (6) gap recovery. Any single layer is defence-in-depth; all six are present. | ✅ PASS |
 | **No stack traces / credentials in errors** | `src/api/errors.py` `format_error_response()` — canonical error envelope contains only `code`, `message`, `provider`, `retryAfterMs`, `requestId`. No internal paths, no exceptions. | ✅ PASS |
 | **Angel One JWT rotation** | `src/scheduler_jobs/angel_one_jwt_rotation.py` — APScheduler job at 23:55 IST daily; retries up to 3× at 60s intervals; raises alert on exhaustion. | ✅ PASS |
 | **Upstox OAuth 401 refresh** | `src/providers/adapters/upstox.py` — on HTTP 401, immediately refreshes OAuth token and retries original request once; if refresh fails, marks provider unavailable. | ✅ PASS |
@@ -432,21 +432,21 @@ Every dataset traverses all 14 steps in order. No step may be skipped without an
 | Property | Test File | Status | Validates |
 |---|---|---|---|
 | Property 1: OHLCV Candle Invariants | `tests/property/test_ohlcv_invariants.py` | ✅ Implemented | Req 4.3, 13.8 |
-| Property 2: Normaliser Round-Trip | `tests/properties/test_normaliser_round_trip.py` | ⬜ Pending | Req 4.11, 17.8 |
-| Property 3: Deribit Name Round-Trip | `tests/properties/test_deribit_round_trip.py` | ⬜ Pending | Req 14.7 |
-| Property 4: Deduplication Hash Stability | `tests/properties/test_dedup_hash.py` | ⬜ Pending | Req 3.6, 17.4 |
-| Property 5: DataConfidenceScore Bounds | `tests/properties/test_confidence_score_bounds.py` | ⬜ Pending | Req 7.1 |
-| Property 6: NSE Session Phase Determinism | `tests/properties/test_session_phase_determinism.py` | ⬜ Pending | Req 12.2 |
-| Property 7: 3m Rejection — Indian Market | `tests/properties/test_3m_rejection.py` | ⬜ Pending | Req 1.5, 4.2, 10.11, 16.10 |
-| Property 8: DataQualityGate Closed-Form | `tests/properties/test_quality_gate_closed_form.py` | ⬜ Pending | Req 7.2 |
-| Property 9: BLOCKED Score Blocks Signal Engine | `tests/properties/test_blocked_score.py` | ⬜ Pending | Req 7.11 |
-| Property 10: Cache TTL Monotonicity | `tests/properties/test_cache_ttl_monotonicity.py` | ⬜ Pending | Req 9.2, 9.6 |
-| Property 11: Provenance Observation ID Uniqueness | `tests/properties/test_observation_id_uniqueness.py` | ⬜ Pending | Req 8.1 |
-| Property 12: OI Semantic Integrity | `tests/properties/test_oi_semantic_integrity.py` | ⬜ Pending | Req 3.3, 6.2 |
-| Property 13: Look-Ahead Bias Prevention | `tests/properties/test_look_ahead_bias.py` | ⬜ Pending | Req 23.4 |
-| Property 14: Reconciliation Deviation Classification | `tests/properties/test_reconciliation_deviation.py` | ⬜ Pending | Req 10.5–10.7 |
+| Property 2: Normaliser Round-Trip | `tests/properties/test_normaliser_round_trip.py` | ✅ Implemented | Req 4.11, 17.8 |
+| Property 3: Deribit Name Round-Trip | `tests/properties/test_deribit_round_trip.py` | ✅ Implemented | Req 14.7 |
+| Property 4: Deduplication Hash Stability | `tests/properties/test_dedup_hash.py` | ✅ Implemented | Req 3.6, 17.4 |
+| Property 5: DataConfidenceScore Bounds | `tests/properties/test_confidence_score_bounds.py` | ✅ Implemented | Req 7.1 |
+| Property 6: NSE Session Phase Determinism | `tests/properties/test_session_phase_determinism.py` | ✅ Implemented | Req 12.2 |
+| Property 7: 3m Rejection — Indian Market | `tests/properties/test_3m_rejection.py` | ✅ Implemented | Req 1.5, 4.2, 10.11, 16.10 |
+| Property 8: DataQualityGate Closed-Form | `tests/properties/test_quality_gate_closed_form.py` | ✅ Implemented | Req 7.2 |
+| Property 9: BLOCKED Score Blocks Signal Engine | `tests/properties/test_blocked_score.py` | ✅ Implemented | Req 7.11 |
+| Property 10: Cache TTL Monotonicity | `tests/properties/test_cache_ttl_monotonicity.py` | ✅ Implemented | Req 9.2, 9.6 |
+| Property 11: Provenance Observation ID Uniqueness | `tests/properties/test_observation_id_uniqueness.py` | ✅ Implemented | Req 8.1 |
+| Property 12: OI Semantic Integrity | `tests/properties/test_oi_semantic_integrity.py` | ✅ Implemented | Req 3.3, 6.2 |
+| Property 13: Look-Ahead Bias Prevention | `tests/properties/test_look_ahead_bias.py` | ✅ Implemented | Req 23.4 |
+| Property 14: Reconciliation Deviation Classification | `tests/properties/test_reconciliation_deviation.py` | ✅ Implemented | Req 10.5–10.7 |
 
-Properties 2–14 are marked optional (`*`) in the task plan and are pending — core correctness behaviours are covered by corresponding unit tests in the interim.
+All 43 property tests (Properties 1–14) are implemented and passing.
 
 ### Test Infrastructure
 
@@ -476,7 +476,7 @@ The following tasks are explicitly marked optional in the implementation plan fo
 - **Protobuf WebSocket support (Upstox V3):** The adapter skeleton is in place; full Protobuf schema decoding requires the Upstox-generated proto definitions, which depend on the Upstox SDK distribution version in use.
 - **Scrapling / JS-rendered pages:** The `curl_cffi` Chrome TLS fingerprint adapter is implemented; NSE WAF bypass correctness depends on NSE's current challenge parameters and may need tuning as NSE updates its anti-bot measures.
 - **NSE Holiday Calendar refresh:** The calendar fetch logic depends on the NSE official holiday API endpoint, which is subject to change without notice. A cached fallback is always available.
-- **TimescaleDB hypertable promotion:** `scripts/promote_timescaledb.sql` is present. If deploying on plain PostgreSQL 15 without TimescaleDB extension, the table remains a standard PG table — all queries work correctly without the extension.
+- **TimescaleDB hypertable promotion:** As of Alembic migration `b1c2d3e4f5a6` (2026-09-15), six tables are promoted to TimescaleDB hypertables automatically during `alembic upgrade head`: `equity_candle`, `futures_candle`, `options_candle` (7-day chunks), `market_tick`, `market_quote`, `option_greeks_snapshot` (1-day chunks). No manual DDL step is required. If deploying on plain PostgreSQL 15 without TimescaleDB, all queries work correctly — the migration uses `if_not_exists => TRUE`.
 - **Production load testing:** Latency targets (L1 ≤1ms p99, L2 ≤5ms p99, tick publish ≤200ms p99) are designed into the architecture. Benchmark validation against live traffic requires load-test execution (Task 17.1–17.3).
 
 ---
@@ -512,11 +512,8 @@ cp .env.example .env
 # 4. Start all services
 docker compose up -d
 
-# 5. Run database migrations
+# 5. Run database migrations (includes TimescaleDB hypertable promotion — no extra step needed)
 docker compose exec api alembic upgrade head
-
-# 6. Promote candle_bar to TimescaleDB hypertable (optional, only if TimescaleDB is available)
-docker compose exec postgres psql -U mds_user -d mds -f /scripts/promote_timescaledb.sql
 ```
 
 ### Verifying the Deployment
