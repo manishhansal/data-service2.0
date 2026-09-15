@@ -396,6 +396,14 @@ class HistoricalEngine:
         # This accumulates across calls in the process lifetime.
         self._reconciliation_results: list[ReconciliationResult] = []
 
+        # Optional pre-authenticated provider adapters.  When set, _fetch_candles
+        # reuses the shared instance instead of constructing + authenticating a
+        # fresh one per chunk — critical for bulk backfills where repeated TOTP
+        # logins trigger Angel One's rate limiter (HTTP 403).
+        # Injected by the backfill script or the server lifespan after auth.
+        self._angel_one_adapter: Optional["AngelOneAdapter"] = None  # type: ignore[name-defined]  # noqa: F821
+        self._upstox_adapter: Optional["UpstoxAdapter"] = None  # type: ignore[name-defined]  # noqa: F821
+
     # ------------------------------------------------------------------ #
     # Core public method
     # ------------------------------------------------------------------ #
@@ -1399,18 +1407,28 @@ class HistoricalEngine:
                         hint="Add token to _ANGEL_ONE_KNOWN_TOKENS or populate instrument_master",
                     )
 
-                adapter = AngelOneAdapter(
-                    api_key=settings.angel_one_api_key,
-                    client_id=settings.angel_one_client_id,
-                    totp_secret=settings.angel_one_totp_secret,
-                    mpin=settings.angel_one_mpin,
-                )
-                await adapter.ensure_authenticated()
+                # Reuse a pre-authenticated shared adapter when available
+                # (avoids repeated TOTP logins that trigger HTTP 403 under load).
+                _owns_adapter = False
+                if self._angel_one_adapter is not None:
+                    adapter = self._angel_one_adapter
+                    await adapter.ensure_authenticated()
+                else:
+                    adapter = AngelOneAdapter(
+                        api_key=settings.angel_one_api_key,
+                        client_id=settings.angel_one_client_id,
+                        totp_secret=settings.angel_one_totp_secret,
+                        mpin=settings.angel_one_mpin,
+                    )
+                    await adapter.ensure_authenticated()
+                    _owns_adapter = True
+
                 candles = await adapter.fetch_historical_ohlcv(
                     symbol=symbol, token=angel_token, from_date=from_str,
                     to_date=to_str, interval=interval, exchange=exchange,
                 )
-                await adapter.close()
+                if _owns_adapter:
+                    await adapter.close()
 
                 # If Angel One returns empty and this is an EQ/IDX 1d request,
                 # fall back to Yahoo Finance so the backfill still succeeds.
@@ -1465,12 +1483,20 @@ class HistoricalEngine:
                     )
                     return []
 
-                upstox_adapter = UpstoxAdapter(
-                    api_key=settings.upstox_api_key or "",
-                    api_secret=settings.upstox_api_secret or "",
-                    redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
-                )
-                await upstox_adapter.set_access_token(settings.upstox_access_token)
+                # Reuse injected adapter when available to avoid
+                # rebuilding the OAuth session on every chunk.
+                _owns_upstox = False
+                if self._upstox_adapter is not None:
+                    upstox_adapter = self._upstox_adapter
+                else:
+                    upstox_adapter = UpstoxAdapter(
+                        api_key=settings.upstox_api_key or "",
+                        api_secret=settings.upstox_api_secret or "",
+                        redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
+                    )
+                    await upstox_adapter.set_access_token(settings.upstox_access_token)
+                    _owns_upstox = True
+
                 logger.debug(
                     "upstox_key_resolved",
                     component="historical_engine",
@@ -1487,7 +1513,8 @@ class HistoricalEngine:
                     to_date=to_str_date,
                     interval=interval,
                 )
-                await upstox_adapter.aclose()
+                if _owns_upstox:
+                    await upstox_adapter.aclose()
 
                 # Upstox returns candles as lists: [timestamp, o, h, l, c, vol, oi]
                 # Normalize to the dict format the engine expects.
