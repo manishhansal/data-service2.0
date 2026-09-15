@@ -2,7 +2,8 @@
 backfill_india_1y.py
 ====================
 One-shot script to fetch the last 1 year of Indian market OHLCV data
-(NSE indices + Nifty 50 equities) and persist it to the candle_bar table.
+(NSE indices + Nifty 50 equities) and persist it to the canonical tables
+(equity_candle for EQ/IDX, futures_candle for FO) via HistoricalEngine.
 
 Uses the project's existing HistoricalEngine, provider adapters, and DB
 engine — exactly the same code path that the API uses at runtime.
@@ -380,7 +381,10 @@ async def _backfill_all(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Backfill 1 year of Indian market OHLCV data into candle_bar.",
+        description=(
+            "Backfill 1 year of Indian market OHLCV data into the canonical tables "
+            "(equity_candle for EQ/IDX, futures_candle for FO) via HistoricalEngine."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
