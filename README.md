@@ -630,7 +630,7 @@ Once inside `psql`, useful meta-commands:
 
 ```sql
 \dt             -- list all tables
-\d candle_bar   -- describe a table (columns, types, constraints)
+\d equity_candle   -- describe a table (columns, types, constraints)
 \di             -- list all indexes
 \dn             -- list schemas
 \q              -- quit
@@ -650,20 +650,20 @@ docker compose --env-file .env.local exec postgres \
     FROM pg_stat_user_tables
     ORDER BY n_live_tup DESC;"
 
-# Latest 10 candle bars
+# Latest 10 NSE equity candles
 docker compose --env-file .env.local exec postgres \
   psql -U mds_user -d mds -c "
-    SELECT symbol, time, open, high, low, close, volume
-    FROM candle_bar
+    SELECT instrument_id, time, open, high, low, close, volume
+    FROM equity_candle
     ORDER BY time DESC
     LIMIT 10;"
 
-# Candle bars for a specific symbol and date range
+# Candles for a specific symbol and date range
 docker compose --env-file .env.local exec postgres \
   psql -U mds_user -d mds -c "
     SELECT time, open, high, low, close, volume
-    FROM candle_bar
-    WHERE symbol = 'RELIANCE' AND interval = '1d'
+    FROM equity_candle
+    WHERE instrument_id = 'RELIANCE' AND interval_str = '1d'
       AND time >= '2026-09-01'
     ORDER BY time;"
 
@@ -730,15 +730,14 @@ APP_ENV=local alembic revision --autogenerate -m "my change"
 APP_ENV=local alembic downgrade -1
 ```
 
-### Optional: TimescaleDB hypertable
+### TimescaleDB hypertables
 
-If TimescaleDB is available in your PostgreSQL instance, convert the OHLCV table to a hypertable for better time-series query performance:
+TimescaleDB hypertable promotion is handled automatically by the Alembic migration `b1c2d3e4f5a6`. After running `alembic upgrade head` against a PostgreSQL instance with TimescaleDB installed, six tables become hypertables:
 
-```bash
-docker compose --env-file .env.local exec postgres \
-  psql -U mds_user -d mds \
-  -c "SELECT create_hypertable('candle_bar', 'time', if_not_exists => TRUE);"
-```
+- `equity_candle`, `futures_candle`, `options_candle` — 7-day chunks (OHLCV)
+- `market_tick`, `market_quote`, `option_greeks_snapshot` — 1-day chunks (live data)
+
+No manual DDL step is required. If TimescaleDB is not installed, the tables remain as plain PostgreSQL tables and all functionality is preserved — the migration uses `if_not_exists => TRUE` so it is safe to run against either setup.
 
 ---
 

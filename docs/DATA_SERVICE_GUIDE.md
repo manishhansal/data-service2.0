@@ -180,7 +180,7 @@ data-service2.0/
 │   └── versions/         Migration scripts
 │
 ├── docker/               Docker Compose override files and scripts
-├── scripts/              Admin scripts (promote_timescaledb.sql, etc.)
+├── scripts/              Admin scripts (load_fno_instrument_master.py, populate_exchange_calendar.py, backfill_india_1y.py, etc.)
 ├── docs/                 Extended documentation
 │   └── DATA_SERVICE_GUIDE.md  ← this file
 │
@@ -428,7 +428,7 @@ Consumer
 | Data type | Endpoint | Providers | Notes |
 |---|---|---|---|
 | Live quote | `GET /v1/india/quotes/{symbol}` | Scrapling/NSE, Angel One SmartAPI | 500ms p99 publish latency |
-| Batch live quotes | `GET /v1/india/quotes?symbols=...` | Same | Up to 50 symbols per request |
+| Batch live quotes | `GET /v1/india/quotes/batch?symbols=...` | Same | Up to 200 symbols per request |
 | Option chain | `GET /v1/india/option-chain` | Scrapling/NSE, Angel One | IV/Greeks/bid/ask are null when absent |
 | Historical OHLCV | `GET /v1/india/historical` | Angel One, Upstox, OpenChart, Jugaad-data | Max 10K candles per response |
 | Market session | `GET /v1/india/market/status` | Internal (IST clock + holiday calendar) | 6 session phases |
@@ -862,7 +862,7 @@ L2: Redis 7 (src/cache/redis_client.py)
       provider health     5 seconds
       │ miss
       ▼
-L3: PostgreSQL (candle_bar + provenance tables)
+L3: PostgreSQL (equity_candle + futures_candle + options_candle + provenance tables)
       │ miss
       ▼
 Provider call → populate all three cache levels
@@ -1470,11 +1470,14 @@ The API logs `redis_unavailable` and enters degraded mode. Check `REDIS_URL` and
 
 ### TimescaleDB extension missing
 
-The platform works correctly with plain PostgreSQL 15. TimescaleDB is optional. If you want to enable it:
+The platform works correctly with plain PostgreSQL 15. TimescaleDB is optional but recommended for time-series query performance. If you want to enable it:
 ```bash
 docker compose exec postgres psql -U mds_user -d mds -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
-psql $DATABASE_URL -f scripts/promote_timescaledb.sql
+# Then run the Alembic migration — it promotes all 6 canonical tables to hypertables automatically:
+docker compose --env-file .env.local exec api alembic upgrade head
 ```
+
+TimescaleDB hypertable promotion is embedded in the Alembic migration `b1c2d3e4f5a6` using `create_hypertable(..., if_not_exists => TRUE)`. The following tables become hypertables automatically: `equity_candle`, `futures_candle`, `options_candle` (7-day chunks); `market_tick`, `market_quote`, `option_greeks_snapshot` (1-day chunks).
 
 ---
 

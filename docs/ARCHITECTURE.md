@@ -53,7 +53,7 @@ External Providers
   14-Step Pipeline       ← validate, normalise, deduplicate, score, cache, persist
         │
         ▼
-   Three-Level Cache     ← L1 LRU → L2 Redis → L3 PostgreSQL
+   Three-Level Cache     ← L1 LRU → L2 Redis → L3 PostgreSQL (canonical tables)
         │
         ▼
   REST API / WebSocket   ← FastAPI, port 8200, auth enforced on all /v1/* routes
@@ -130,11 +130,15 @@ data-service2.0/
 │   │
 │   ├── db/                      Database layer
 │   │   ├── engine.py            SQLAlchemy async engine factory
-│   │   └── models.py            ORM models (candle_bar, data_gap, provenance, …)
+│   │   ├── timescale.py         TimescaleDB detection + hypertable status logging
+│   │   └── models/              ORM models — equity_candle, futures_candle,
+│   │                            options_candle, market_tick, market_quote,
+│   │                            exchange_calendar, instrument_provider_mapping, …
 │   │
 │   ├── engines/                 Core business logic engines
 │   │   ├── market_engine.py     Indian live quotes, option chain, tick ingestion
-│   │   ├── historical_engine.py OHLCV backfill, chunked fetch, reconciliation
+│   │   ├── historical_engine.py OHLCV backfill → equity_candle / futures_candle / options_candle
+│   │   ├── trading_calendar_service.py  DB-backed trading day resolver (exchange_calendar table)
 │   │   ├── gap_recovery.py      PENDING→RECOVERING→RECOVERED/EXHAUSTED state machine
 │   │   ├── streaming_engine.py  Tick dedup + Event Bus fan-out (≤200ms p99)
 │   │   ├── quality_engine.py    DataConfidenceScore (0–95) + DataQualityGate
@@ -216,7 +220,10 @@ data-service2.0/
 │   ├── test_deribit_live.py     Live Deribit connectivity test
 │   ├── test_provider_auth.py    All provider auth validation
 │   ├── test_api_curl.sh         Full API smoke test (curl-based)
-│   └── promote_timescaledb.sql  TimescaleDB hypertable promotion script
+│   ├── load_fno_instrument_master.py  Loads 34K+ F&O contracts into instrument_master
+│   ├── load_fno_universe.py     Populates fno_universe_membership (238 active rows)
+│   ├── populate_exchange_calendar.py  Loads NSE/NFO calendar (2024–2028, 3 654 rows)
+│   └── backfill_india_1y.py     1-year NSE historical candle backfill (EQ/IDX/FO)
 │
 ├── docker/postgres/init/        PostgreSQL init scripts (TimescaleDB extension)
 ├── docs/                        Technical documentation
@@ -473,7 +480,8 @@ Request
   │       cache_manager.py
   │
   └─ L3: PostgreSQL 15       Async SQLAlchemy read path
-          + TimescaleDB       Triggered only on L1+L2 miss
+          + TimescaleDB       Canonical tables: equity_candle, futures_candle,
+                              options_candle, market_tick, market_quote, …
 ```
 
 ### Cache behaviours
@@ -499,31 +507,89 @@ Redis Streams-based event bus for real-time data distribution:
 
 **Module**: `src/db/`, `alembic/`
 
-### Tables (managed by Alembic)
+### Schema architecture — v2 (revision `b1c2d3e4f5a6`, 2026-09-15)
 
-| Table | Contents |
+The v2 schema adds 16 new tables across 6 logical layers, replacing the monolithic `candle_bar` table as the write target for all production data.
+
+#### Layer 1 — Instrument Identity
+
+| Table | Type | Purpose |
+|---|---|---|
+| `instrument_master` | Regular | NSE instrument universe — enhanced with `instrument_class` (EQ\|IDX\|FUT\|OPT\|CRYPTO\|ETF) and `name` columns |
+| `instrument_provider_mapping` | Regular | Normalises provider-specific tokens (Angel One token `2885`, Upstox key `NSE_EQ|INE002A01018`, etc.) |
+| `instrument_identity_history` | Regular | Audit trail for symbol/token changes, corporate actions, delistings |
+
+#### Layer 2 — Canonical Candles (TimescaleDB hypertables, 7-day chunks)
+
+| Table | Purpose |
 |---|---|
-| `candle_bar` | OHLCV candles — `(symbol, exchange, interval, time)` primary key |
-| `data_gap` | Gap records with recovery state machine status |
-| `data_provenance` | Per-observation provenance records |
-| `instrument` | NSE instrument master |
-| `fno_universe` | Active F&O universe snapshot |
+| `equity_candle` | NSE/BSE equities + indices OHLCV (segments: EQ, IDX, ETF). **Primary write target for all NSE historical data.** |
+| `futures_candle` | NSE F&O futures OHLCV + open interest (exchange: NFO/BFO) |
+| `options_candle` | NSE F&O options OHLCV + open interest, with `strike` and `option_type` (CE/PE) |
 
-The `candle_bar` table can optionally be promoted to a TimescaleDB hypertable (partitioned by `time`) for significantly faster time-range queries at scale. See `scripts/promote_timescaledb.sql`.
+All three enforce: no `3m` interval (CHECK constraint), OHLC validity (high≥open, high≥close, low≤open, low≤close), volume≥0. Unique index on `(instrument_id, exchange, interval_str, time)` enables `ON CONFLICT DO NOTHING`.
+
+#### Layer 3 — Live Data (TimescaleDB hypertables, 1-day chunks)
+
+| Table | Purpose |
+|---|---|
+| `market_tick` | Live WebSocket ticks — LTP, bid/ask, quantities, sequence number |
+| `market_quote` | Polled live quote snapshots — full OHLCV, circuit limits, 52-week range |
+
+#### Layer 4 — Option Chain
+
+| Table | Purpose |
+|---|---|
+| `option_chain_snapshot` | Point-in-time chain header (UUID PK) — spot price, ATM strike, PCR, max pain, ATM IV |
+| `option_chain_contract` | Per-strike rows (FK → snapshot, CASCADE DELETE) — full Greeks nullable by design |
+| `option_greeks_snapshot` | Greeks time-series (TimescaleDB hypertable, 1-day chunks) |
+
+#### Layer 5 — Calendar + Sessions
+
+| Table | Purpose |
+|---|---|
+| `exchange_calendar` | NSE/BSE holiday + trading day registry (2024–2028, 3 654 rows). Unique on `(exchange, segment, calendar_date)`. Day types: TRADING_DAY, WEEKEND, OFFICIAL_HOLIDAY, SPECIAL_SESSION, NOT_PUBLISHED, UNKNOWN |
+| `market_session` | Actual session open/close records per day |
+| `fno_universe_membership` | Point-in-time F&O eligibility — `effective_from`/`effective_to` for survivorship-bias-free backfill |
+
+#### Layer 6 — Operations
+
+| Table | Purpose |
+|---|---|
+| `ingestion_job` | Backfill/live/reconcile/gap-recovery job tracking (UUID PK, self-referencing `parent_job_id`) |
+| `ingestion_checkpoint` | Resumable job state — `last_successful_timestamp` per `(provider, dataset, instrument_id, exchange, interval)` |
+| `candle_bar_quarantine` | Rows from `candle_bar` that could not be classified during migration |
+
+#### `candle_bar` — deprecated archive
+
+`candle_bar` is **retained as a read-only archive** and marked with a deprecation `COMMENT`. It is not dropped and not structurally modified. No production code writes to it. It contains 5,425,725 rows (all NSE data migrated to `equity_candle`; 6 Binance rows tagged `CRYPTO_PENDING`). Scheduled for removal after 2026-10-15.
+
+#### Production data as of 2026-09-15
+
+| Table | Rows |
+|---|---|
+| `equity_candle` | 5,425,719 (72 TimescaleDB chunks) |
+| `futures_candle` | 20 (live F&O data — NIFTY + RELIANCE Sep FUT) |
+| `instrument_provider_mapping` | 68,915 (Angel One + Upstox tokens) |
+| `exchange_calendar` | 3,654 (NSE/EQ + NFO/FO, 2024–2028) |
+| `fno_universe_membership` | 238 active |
+| `candle_bar` | 5,425,725 (archive — 5.4M NSE + 6 CRYPTO_PENDING) |
 
 ### Migration management
 
 ```bash
-# Apply all pending migrations
+# Apply all pending migrations (current head: b1c2d3e4f5a6)
 docker compose --env-file .env.local exec api alembic upgrade head
 
-# Check current state
+# Check current revision
 docker compose --env-file .env.local exec api alembic current
 
 # Create a new migration
 docker compose --env-file .env.local exec api \
   alembic revision --autogenerate -m "description"
 ```
+
+> **TimescaleDB hypertables** are created automatically by the Alembic migration (`b1c2d3e4f5a6`) using `create_hypertable(..., if_not_exists => TRUE)`. No manual DDL step is needed.
 
 ---
 
@@ -629,7 +695,7 @@ Applied as a router-level FastAPI dependency on every `/v1/*` data route. Accept
 | Job | Schedule | Purpose |
 |---|---|---|
 | `fno_universe_refresh` | 08:45 IST daily | Refresh the F&O instrument universe from NSE |
-| `angel_one_jwt_rotation` | 23:55 IST daily | Rotate Angel One JWT before market open |
+| `angel_one_jwt_rotation` | 23:55 IST daily | Rotate Angel One JWT before market open; new token stored in Redis |
 | `clock_skew_monitor` | Every ≤30 seconds | NTP clock-skew sampling (Requirement 18.8) |
 
 ### Worker (`src/worker.py`)
@@ -640,6 +706,17 @@ Long-running background process responsible for:
 - Cross-provider reconciliation jobs
 - Provenance persistence retries
 - DataIncident archival for EXHAUSTED gaps
+
+### TradingCalendarService (`src/engines/trading_calendar_service.py`)
+
+DB-backed authoritative trading day resolver. Replaces hardcoded weekday logic for all backfill and scheduling decisions.
+
+- **Primary source**: `exchange_calendar` table (populated by `scripts/populate_exchange_calendar.py`)
+- **Fallback**: in-memory `HolidayCalendar` when DB is unavailable
+- **API**: `is_trading_day(date)`, `get_previous_trading_day(date)`, `get_next_trading_day(date)`, `get_trading_days(start, end)`
+- **Design guarantees**: weekend ≠ official holiday; `NOT_PUBLISHED` ≠ trading day; `UNKNOWN` ≠ trading day; no look-ahead bias
+
+All F&O backfill jobs **must** use `TradingCalendarService` rather than inline weekday checks.
 
 ---
 
@@ -663,6 +740,10 @@ Long-running background process responsible for:
 | `redis_connected` | info | Redis pool created |
 | `postgres_connected` | info | DB engine created |
 | `angel_one_adapter_authenticated` | info | Angel One TOTP+JWT succeeded |
+| `angel_one_jwt_stored_in_redis` | info | JWT cached in Redis (TTL 6 h) — other workers will load it |
+| `angel_one_jwt_loaded_from_redis` | info | Worker loaded shared JWT from Redis (no TOTP needed) |
+| `instrument_master_loaded` | info | InstrumentMasterService loaded from DB into memory |
+| `historical_engine_ready` | info | HistoricalEngine pre-wired with shared adapters |
 | `upstox_adapter_ready` | info | Upstox access token accepted |
 | `api_key_rejected` | warning | Unknown key in X-API-KEY header |
 | `circuit_open` | warning | A provider circuit transitioned to OPEN |
@@ -678,9 +759,9 @@ All adapters implement `src/providers/adapters/base.py:ProviderAdapter`.
 
 | Adapter | Module | Auth | Data types | Notes |
 |---|---|---|---|---|
-| **Angel One SmartAPI** | `angel_one.py` | TOTP + JWT (MPIN) | Live quotes, option chain, OHLCV historical, broker analytics (PCR, OI, gainers) | 3 req/s limit; 1m historical max 30 days per chunk; 5m/15m max 90 days |
+| **Angel One SmartAPI** | `angel_one.py` | TOTP + JWT (MPIN); Redis-shared JWT across workers | Live quotes, option chain, OHLCV historical, broker analytics (PCR, OI, gainers) | 3 req/s limit; 1m historical max 30 days per chunk; 5m/15m max 90 days. Redis key `mds:angel_one:jwt:{client_id}` (TTL 6 h) prevents TOTP conflicts across 4 Uvicorn workers |
 | **Upstox V3** | `upstox.py` | OAuth2 access token (pre-obtained) | OHLCV historical, live quotes, index intraday | 1m: 7-day chunks; 5m/15m: 30-day chunks; 1d: 365-day chunks; Protobuf WS |
-| **NSE Scrapling** | `scrapling_nse.py` | None (public) | NSE option chain, market status | Uses curl-cffi for NSE WAF bypass |
+| **NSE Scrapling** | `scrapling_nse.py` | None (public) | Index live quotes via `/api/allIndices` (139+ indices, no JS cookies required); market status | NSE `quote-equity` returns HTTP 403 (Akamai WAF requires JS/behavioral challenge); equity quotes unsupported as of Sep 2026. Use `fetch_all_indices()` for all index symbols (NIFTY, BANKNIFTY, FINNIFTY, etc.) |
 | **Jugaad-data** | `jugaad_data.py` | None (public) | NSE historical OHLCV (EOD) | Open-source fallback for Indian historical data |
 | **OpenChart** | `openchart.py` | None (public) | NSE intraday OHLCV | Open-source fallback |
 | **Yahoo Finance** | `yahoo_finance.py` | None (public) | NSE index historical, some equity | NSE symbol suffix mapping (`.NS`) |
@@ -758,7 +839,9 @@ ProviderAdapter.get_ohlcv(chunk)   [repeated per chunk]
 14-Step Pipeline (per chunk)
         │
         ├─ step 7: gap_detect → create PENDING gap record
-        ├─ step 13: persist → write to candle_bar table
+        ├─ step 13: persist → write to canonical table
+        │           (equity_candle / futures_candle / options_candle)
+        │           NEVER writes to candle_bar (deprecated archive)
         └─ step 14: publish DatasetReady event
         
 GapRecovery background task

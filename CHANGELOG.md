@@ -10,7 +10,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [2.0.0] — 2026-09-15 (post-audit hardened)
 
+### Added (schema redesign — v2)
+
+- **Alembic migration `b1c2d3e4f5a6`** — 16 new tables across 6 schema layers, replacing `candle_bar` as the production write target for all Indian market data:
+  - **Layer 1 (Instrument Identity)**: `instrument_provider_mapping` (provider token normalisation), `instrument_identity_history` (symbol/token change audit trail). `instrument_master` enhanced with `instrument_class` (EQ|IDX|FUT|OPT|CRYPTO|ETF) and `name` columns.
+  - **Layer 2 (Canonical Candles — TimescaleDB hypertables, 7-day chunks)**: `equity_candle` (NSE/BSE equities + indices), `futures_candle` (F&O futures + OI), `options_candle` (F&O options + OI, CE/PE only). All three enforce a `3m` interval CHECK constraint and full OHLC validity constraints.
+  - **Layer 3 (Live Data — TimescaleDB hypertables, 1-day chunks)**: `market_tick` (WebSocket ticks), `market_quote` (polled snapshots).
+  - **Layer 4 (Option Chain)**: `option_chain_snapshot` (UUID PK, chain header), `option_chain_contract` (per-strike, Greeks nullable by design), `option_greeks_snapshot` (TimescaleDB hypertable, 1-day chunks).
+  - **Layer 5 (Calendar + Sessions)**: `exchange_calendar` (NSE/BSE trading day registry, unique per `(exchange, segment, date)`), `market_session` (actual session records), `fno_universe_membership` (point-in-time F&O eligibility with `effective_from`/`effective_to`).
+  - **Layer 6 (Operations)**: `ingestion_job` (UUID PK, self-referencing `parent_job_id`), `ingestion_checkpoint` (resumable job state), `candle_bar_quarantine` (unclassifiable migration rows).
+  - `candle_bar` marked as deprecated archive (COMMENT DDL). Not dropped. Scheduled for removal 2026-10-15.
+  - TimescaleDB promotion embedded in migration via `create_hypertable(..., if_not_exists => TRUE)` — no manual DDL step needed.
+
+- **NSE data migration** (`scripts/migrate_candle_bar.py`): 5,425,719 NSE rows from `candle_bar` → `equity_candle`. Delta = 0 (verified).
+
+- **F&O reference data** loaded via new scripts:
+  - `scripts/load_fno_instrument_master.py`: 34,460 F&O contracts into `instrument_master` + 68,915 rows into `instrument_provider_mapping` (Angel One tokens, sourced from SmartAPI scrip master).
+  - `scripts/load_fno_universe.py`: 238 active `fno_universe_membership` rows (effective_from 2020-01-01).
+  - `scripts/populate_exchange_calendar.py`: 3,654 `exchange_calendar` rows (NSE/EQ + NFO/FO, 2024–2028).
+
+- **`TradingCalendarService`** (`src/engines/trading_calendar_service.py`): DB-backed authoritative trading day resolver. Uses `exchange_calendar` as primary source; falls back to in-memory `HolidayCalendar`. All F&O backfill jobs must use this service. Guarantees: weekend ≠ holiday, NOT_PUBLISHED ≠ trading day, no look-ahead bias.
+
+### Changed (API cutover — v2)
+
+- **`src/api/india.py`** — `GET /v1/india/historical` now reads from `equity_candle` (NSE/BSE) or `futures_candle` (NFO/BFO). `candle_bar` is no longer read by any endpoint. Batch quotes endpoint URL corrected to `/v1/india/quotes/batch` (was `/v1/india/quotes?symbols=...`); maximum raised to 200 symbols (was 50).
+- **`src/engines/historical_engine.py`** — `bulk_upsert_candles()` routes EQ/IDX → `equity_candle`, FO/FUT → `futures_candle`, OPT → `options_candle` via `_canonical_table_for()`. Never writes to `candle_bar`. F&O+1d routes to Angel One (not jugaad_data).
+- **`src/db/timescale.py`** — `promote_hypertable()` changed from runtime DDL (was promoting `candle_bar`) to verification-only: detects TimescaleDB version and logs hypertable inventory. No DDL executed at startup.
+- **`src/providers/adapters/scrapling_nse.py`** — `fetch_live_quote()` for index symbols (NIFTY, BANKNIFTY, FINNIFTY, etc.) routes to `allIndices` endpoint (139+ live index prices, no Akamai JS cookies required). `fetch_all_indices()` method added. NSE `quote-equity` still attempted for equity symbols (403 WAF known issue).
+
 ### Fixed (operational — this session)
+
+- **TOTP multi-worker conflict** (`src/providers/adapters/angel_one.py` + `src/server.py`): `AngelOneAdapter` accepts `redis_client` parameter. Worker 1 does TOTP login and stores JWT at `mds:angel_one:jwt:{client_id}` (TTL 6 h) using a distributed lock. Workers 2–4 load JWT from Redis, skipping TOTP entirely. Zero HTTP 403 at startup with 4 Uvicorn workers.
+- **`src/server.py` startup**: pre-creates `HistoricalEngine` with injected shared adapter instances and DB engine. `InstrumentMasterService` loaded from DB at startup. `MarketEngine` wired with real `AngelOneAdapter`.
+
+### Fixed (test suite — 2026-09-15)
+
+- **`tests/unit/db/test_timescale.py`**: 5 tests updated to match new `promote_hypertable` contract — no DDL executed, no `commit()` call, `_PROMOTE_HYPERTABLE_SQL` removed. Tests now verify `_LIST_HYPERTABLES_SQL` inventory query instead.
+- **`tests/unit/providers/adapters/test_scrapling_nse.py`**: `test_successful_quote_source_type_is_open_source_nse_derived` updated to mock `fetch_all_indices()` for NIFTY (index fast path), not `_get` directly.
+- **`tests/test_pre_fno_backfill_certification.py` + `tests/test_v2_schema_migration.py`**: `db_engine` fixture now parses `.env.local` directly to resolve `DATABASE_URL`, bypassing `get_settings()` lru_cache and the `Settings.model_config.env_file` class-level lock that baked in the wrong `.env` path when unit tests ran first. Fixture teardown switched to `engine.sync_engine.dispose()` to fix pre-existing `pytest-asyncio` 1.4.0 teardown error on Python 3.14.
+- **`tests/unit/engines/test_quality_gate.py`**: `test_future_timestamp_fails` computed `_NOW_MS` at module import — caused flaky failure when full suite ran > 2 minutes. Fixed to compute `time.time()` at test execution.
+
+**Total test count: 4,662 passing, 0 failing, 0 errors** (was 139 failing before this session).
 
 - **Dockerfile CMD**: Replaced `--log-config /dev/null` with `--no-access-log`. Uvicorn 0.52+ rejects an empty file as a logging config; the new flag achieves the same result (no per-request access log) without crashing on startup. (`Dockerfile`)
 - **Dockerfile build**: Added `README.md` to the `COPY pyproject.toml README.md ./` instruction. Hatchling validates the `readme` field in `pyproject.toml` during wheel metadata generation and raised `OSError: Readme file does not exist: README.md` without it. (`Dockerfile`)
