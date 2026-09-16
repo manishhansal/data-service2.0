@@ -182,11 +182,19 @@ class TestFetchHistoricalOHLCV:
             "NSE_EQ|INE002A01018", "2024-01-15", "2024-01-15", "1m"
         )
 
-        assert result == fake_candles
+        # V3 adapter returns normalized dicts with named keys, not raw arrays
+        assert len(result) == 2
+        assert result[0]["timestamp"] == "2024-01-15T09:15:00+05:30"
+        assert result[0]["open"] == 500.0
+        assert result[0]["close"] == 503.0
+        assert result[0]["volume"] == 100000
+        assert result[0]["open_interest"] == 0
+        assert result[0]["provider"] == "upstox"
+        assert result[0]["api_version"] == "v3"
 
     @pytest.mark.parametrize("interval", ["1m", "5m", "10m", "15m", "30m", "1h", "1d"])
     async def test_uses_correct_api_interval_in_url(self, interval: str) -> None:
-        """The Upstox API interval string must appear in the request URL."""
+        """The V3 unit/interval path must appear in the request URL."""
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.request.return_value = _mock_response(
             200, _candles_response([])
@@ -200,11 +208,17 @@ class TestFetchHistoricalOHLCV:
 
         call_args = mock_client.request.call_args
         called_url: str = call_args[0][1]  # positional: method, url
-        expected_api_interval = INTERVAL_MAP[interval]
-        assert expected_api_interval in called_url, (
-            f"Expected {expected_api_interval!r} in URL for interval {interval!r}; "
-            f"got {called_url!r}"
+        # V3 URL contains unit/interval_value path segments
+        from src.providers.adapters.upstox import INTERVAL_MAP_V3
+        unit, interval_value = INTERVAL_MAP_V3[interval]
+        assert unit in called_url, (
+            f"Expected unit {unit!r} in URL for interval {interval!r}; got {called_url!r}"
         )
+        assert str(interval_value) in called_url, (
+            f"Expected interval_value {interval_value!r} in URL; got {called_url!r}"
+        )
+        # Must be V3 URL
+        assert "/v3/historical-candle" in called_url
 
     async def test_request_uses_bearer_token(self) -> None:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
@@ -273,16 +287,11 @@ class TestHttp401SuccessCase:
         ]
         mock_client = AsyncMock(spec=httpx.AsyncClient)
 
-        # First call returns 401; second call (after refresh) returns 200.
         token_refresh_response = _mock_response(
             200, {"access_token": "refreshed-token"}
         )
         ok_response = _mock_response(200, _candles_response(fake_candles))
 
-        # client.request: first → 401, then (for token refresh POST) → 200 token,
-        # then → 200 data.
-        # But refresh_token uses client.post, not client.request.
-        # Simulate: request → 401, post (refresh) → 200 with token, request → 200 data.
         mock_client.request.side_effect = [
             _mock_response(401, {}),  # initial request → 401
             ok_response,              # retry after refresh → 200
@@ -296,7 +305,10 @@ class TestHttp401SuccessCase:
             "NSE_EQ|INE002A01018", "2024-01-15", "2024-01-15", "1m"
         )
 
-        assert result == fake_candles
+        # V3 returns normalized dicts
+        assert len(result) == 1
+        assert result[0]["open"] == 500.0
+        assert result[0]["close"] == 503.0
         # Exactly two request() calls were made.
         assert mock_client.request.call_count == 2
         # Token refresh (POST) was called exactly once.
@@ -404,7 +416,7 @@ class TestHttp401FailureCase:
         adapter = _make_adapter()
         # Do NOT call set_access_token — adapter has no token.
 
-        with pytest.raises(ProviderAuthError, match="No Upstox access token set"):
+        with pytest.raises(ProviderAuthError, match="No Upstox"):
             await adapter.ensure_authenticated()
 
 

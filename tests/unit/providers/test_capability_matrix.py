@@ -248,29 +248,35 @@ class TestUpstoxCapabilities:
         assert cap.priority == 2  # secondary to Angel One
 
     def test_upstox_chunk_days_1m(self) -> None:
-        assert UPSTOX_CHUNK_DAYS["1m"] == 7
+        # V3: 1-month window for 1-15min intervals = 28 days
+        assert UPSTOX_CHUNK_DAYS["1m"] == 28
 
     def test_upstox_chunk_days_5m(self) -> None:
-        assert UPSTOX_CHUNK_DAYS["5m"] == 30
+        # V3: 1-month window for <=15min
+        assert UPSTOX_CHUNK_DAYS["5m"] == 28
 
     def test_upstox_chunk_days_15m(self) -> None:
-        assert UPSTOX_CHUNK_DAYS["15m"] == 30
+        # V3: 1-month window for <=15min
+        assert UPSTOX_CHUNK_DAYS["15m"] == 28
 
     def test_upstox_chunk_days_1d(self) -> None:
         assert UPSTOX_CHUNK_DAYS["1d"] == 365
 
     def test_upstox_get_chunk_days_1m(self) -> None:
-        assert get_chunk_days(ProviderId.UPSTOX, "1m") == 7
+        # V3 1-month window for 1m
+        assert get_chunk_days(ProviderId.UPSTOX, "1m") == 28
 
     def test_upstox_get_chunk_days_5m(self) -> None:
-        assert get_chunk_days(ProviderId.UPSTOX, "5m") == 30
+        # V3 1-month window for 5m
+        assert get_chunk_days(ProviderId.UPSTOX, "5m") == 28
 
     def test_upstox_get_chunk_days_1d(self) -> None:
         assert get_chunk_days(ProviderId.UPSTOX, "1d") == 365
 
     def test_upstox_rate_limit(self) -> None:
+        # Updated to 50 req/s per NSE circular May 2025
         for cap in _providers_in_matrix(ProviderId.UPSTOX):
-            assert cap.requestsPerSecond == 10.0
+            assert cap.requestsPerSecond == 50.0
 
 
 # ---------------------------------------------------------------------------
