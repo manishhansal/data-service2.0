@@ -39,7 +39,6 @@ _QUALITY_STATUS_CHECK = (
     ")"
 )
 
-
 class OptionChainSnapshot(Base):
     """Point-in-time option chain header record."""
 
@@ -112,7 +111,6 @@ class OptionChainSnapshot(Base):
             f"<OptionChainSnapshot underlying={self.underlying_id!r} "
             f"expiry={self.expiry!r} ts={self.timestamp!r}>"
         )
-
 
 class OptionChainContract(Base):
     """Per-strike row within an OptionChainSnapshot.
@@ -211,7 +209,6 @@ class OptionChainContract(Base):
             f"ltp={self.ltp} iv={self.iv}>"
         )
 
-
 class OptionGreeksSnapshot(Base):
     """IV and Greeks time-series per option instrument.
 
@@ -222,7 +219,7 @@ class OptionGreeksSnapshot(Base):
 
     __tablename__ = "option_greeks_snapshot"
 
-    id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     timestamp: Mapped[datetime.datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
@@ -270,7 +267,6 @@ class OptionGreeksSnapshot(Base):
     )
 
     __table_args__ = (
-        {"primary_key": (id, timestamp)},
         CheckConstraint(_QUALITY_STATUS_CHECK, name="ogs_quality_status_valid"),
         Index("ogs_instrument_timestamp", "instrument_id", text("timestamp DESC")),
     )

@@ -55,7 +55,6 @@ _QUALITY_STATUS_CHECK = (
 )
 _DATA_ORIGIN_CHECK = "data_origin IN ('PROVIDER', 'DERIVED')"
 
-
 class EquityCandle(Base):
     """Canonical OHLCV candle for NSE/BSE equities and indices.
 
@@ -67,7 +66,7 @@ class EquityCandle(Base):
 
     __tablename__ = "equity_candle"
 
-    id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     exchange: Mapped[str] = mapped_column(String(8), nullable=False)
     segment: Mapped[str] = mapped_column(
@@ -76,7 +75,7 @@ class EquityCandle(Base):
     )
     interval_str: Mapped[str] = mapped_column(String(4), nullable=False)
     time: Mapped[datetime.datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
+        TIMESTAMP(timezone=True), nullable=False, primary_key=True,
         comment="Candle open timestamp UTC — hypertable partition key",
     )
     session_date: Mapped[datetime.date] = mapped_column(Date(), nullable=False)
@@ -144,8 +143,6 @@ class EquityCandle(Base):
     )
 
     __table_args__ = (
-        # TimescaleDB requires partition key in PK
-        {"primary_key": (id, time)},
         UniqueConstraint(
             "instrument_id", "exchange", "interval_str", "time",
             name="equity_candle_uq",
@@ -182,7 +179,6 @@ class EquityCandle(Base):
             f"t={self.time!r} close={self.close}>"
         )
 
-
 class FuturesCandle(Base):
     """Canonical OHLCV + OI candle for NSE/BSE F&O futures contracts.
 
@@ -193,7 +189,7 @@ class FuturesCandle(Base):
 
     __tablename__ = "futures_candle"
 
-    id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     underlying_id: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True,
@@ -274,7 +270,6 @@ class FuturesCandle(Base):
     )
 
     __table_args__ = (
-        {"primary_key": (id, time)},
         UniqueConstraint(
             "instrument_id", "exchange", "interval_str", "time",
             name="futures_candle_uq",
@@ -310,7 +305,6 @@ class FuturesCandle(Base):
             f"{self.interval_str!r} close={self.close}>"
         )
 
-
 class OptionsCandle(Base):
     """Canonical OHLCV + OI candle for NSE/BSE F&O options contracts.
 
@@ -321,7 +315,7 @@ class OptionsCandle(Base):
 
     __tablename__ = "options_candle"
 
-    id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     underlying_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     exchange: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -398,7 +392,6 @@ class OptionsCandle(Base):
     )
 
     __table_args__ = (
-        {"primary_key": (id, time)},
         UniqueConstraint(
             "instrument_id", "exchange", "interval_str", "time",
             name="options_candle_uq",

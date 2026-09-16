@@ -36,7 +36,6 @@ _QUALITY_STATUS_CHECK = (
     ")"
 )
 
-
 class MarketTick(Base):
     """Live WebSocket tick record.
 
@@ -49,11 +48,11 @@ class MarketTick(Base):
 
     __tablename__ = "market_tick"
 
-    tick_id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    tick_id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     exchange: Mapped[str] = mapped_column(String(8), nullable=False)
     timestamp: Mapped[datetime.datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
+        TIMESTAMP(timezone=True), nullable=False, primary_key=True,
         comment="Exchange-side tick timestamp — hypertable partition key",
     )
     received_at: Mapped[datetime.datetime] = mapped_column(
@@ -114,7 +113,6 @@ class MarketTick(Base):
     )
 
     __table_args__ = (
-        {"primary_key": (tick_id, timestamp)},
         CheckConstraint(_QUALITY_STATUS_CHECK, name="mt_quality_status_valid"),
         Index(
             "mt_instrument_timestamp",
@@ -128,7 +126,6 @@ class MarketTick(Base):
             f"ltp={self.ltp}>"
         )
 
-
 class MarketQuote(Base):
     """Live quote snapshot (REST polling or full-quote WebSocket message).
 
@@ -141,7 +138,7 @@ class MarketQuote(Base):
 
     __tablename__ = "market_quote"
 
-    quote_id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    quote_id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     exchange: Mapped[str] = mapped_column(String(8), nullable=False)
     timestamp: Mapped[datetime.datetime] = mapped_column(
@@ -210,7 +207,6 @@ class MarketQuote(Base):
     )
 
     __table_args__ = (
-        {"primary_key": (quote_id, timestamp)},
         CheckConstraint(_QUALITY_STATUS_CHECK, name="mq_quality_status_valid"),
         Index(
             "mq_instrument_timestamp",
