@@ -46,9 +46,13 @@ _DEFAULT_RPS: float = 1.0
 #: Per-provider rate limits in requests per second.
 #: Used by TokenBucketRateLimiter when a capability-specific override is not
 #: provided.  Callers may also pass requestsPerSecond directly via acquire().
+#:
+#: Upstox rate limits (per NSE circular, May 2025):
+#:   Standard APIs: 50 req/s, 500/min, 2000/30min.
+#:   Order APIs: 10 req/s (not used here for market data).
 PROVIDER_RATE_LIMITS: dict[str, float] = {
     ProviderId.ANGEL_ONE.value:     3.0,
-    ProviderId.UPSTOX.value:        10.0,
+    ProviderId.UPSTOX.value:        50.0,   # FIXED: was 10.0, actual is 50 req/s
     ProviderId.SCRAPLING_NSE.value: 2.0,
     ProviderId.JUGAAD_DATA.value:   1.0,
     ProviderId.OPENCHART.value:     5.0,

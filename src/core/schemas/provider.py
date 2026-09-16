@@ -40,9 +40,14 @@ class DataType(str, Enum):
 
     LIVE_QUOTE = "LIVE_QUOTE"
     HISTORICAL_OHLCV = "HISTORICAL_OHLCV"
+    HISTORICAL_OI = "HISTORICAL_OI"          # Dedicated OI time-series (Angel One getOIData)
+    INTRADAY_CANDLE = "INTRADAY_CANDLE"      # Current-session candles (Upstox V3 intraday)
     OPTION_CHAIN = "OPTION_CHAIN"
+    OPTION_GREEKS = "OPTION_GREEKS"          # Live IV + Greeks snapshot (both providers)
     INSTRUMENT_MASTER = "INSTRUMENT_MASTER"
     FUTURES_DATA = "FUTURES_DATA"
+    MARKET_INFORMATION = "MARKET_INFORMATION"  # Holidays, timings, status, FII/DII/OI/PCR
+    CLOSING_AUCTION = "CLOSING_AUCTION"       # CAS indicative price (Upstox Sep 2026)
     CRYPTO_KLINES = "CRYPTO_KLINES"
     CRYPTO_FUTURES = "CRYPTO_FUTURES"
     CRYPTO_OPTIONS = "CRYPTO_OPTIONS"
