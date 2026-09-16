@@ -49,11 +49,29 @@ TTL_DAILY_CANDLES: int = 14_400
 #: Option chain snapshot TTL — 15 seconds
 TTL_OPTION_CHAIN: int = 15
 
+#: Option Greeks snapshot TTL — 15 seconds
+TTL_OPTION_GREEKS: int = 15
+
+#: Market depth TTL — 2 seconds (high-frequency depth data)
+TTL_MARKET_DEPTH: int = 2
+
+#: Reconciliation result TTL — 3 seconds
+TTL_RECONCILIATION: int = 3
+
 #: Instrument master TTL — 12 hours (43 200 seconds)
 TTL_INSTRUMENT_MASTER: int = 43_200
 
 #: Provider health TTL — 5 seconds
 TTL_PROVIDER_HEALTH: int = 5
+
+#: Closing auction snapshot TTL — 10 seconds
+TTL_CLOSING_AUCTION: int = 10
+
+#: Exchange status TTL — 30 seconds
+TTL_EXCHANGE_STATUS: int = 30
+
+#: Market holidays TTL — 24 hours
+TTL_MARKET_HOLIDAYS: int = 86_400
 
 # ---------------------------------------------------------------------------
 # Key namespace
