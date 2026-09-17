@@ -268,11 +268,15 @@ _UPSTOX_INSTRUMENT_KEYS: dict[str, str] = {
     "SHREECEM":     "NSE_EQ|INE070A01015",
 }
 
-# Upstox V2 intervals confirmed working on standard plan (verified 2026-09-14).
-# Intervals NOT in this set (5m, 10m, 15m, 1h) return UDAPI1020 on basic plan.
-_UPSTOX_V2_SUPPORTED_INTERVALS: frozenset[str] = frozenset(
-    {"1m", "30m", "1d", "1w", "1M"}
+# All intervals supported by the Upstox V3 historical candle API.
+# V3 supports all canonical intervals on all plans — the old V2 basic-plan
+# restriction (UDAPI1020 on 5m/10m/15m/1h) no longer applies.
+_UPSTOX_V3_SUPPORTED_INTERVALS: frozenset[str] = frozenset(
+    {"1m", "5m", "10m", "15m", "30m", "1h", "1d", "1w", "1M"}
 )
+# Backward-compatible alias kept so any external code referencing the old name
+# still compiles, but it now points to the full V3 set.
+_UPSTOX_V2_SUPPORTED_INTERVALS: frozenset[str] = _UPSTOX_V3_SUPPORTED_INTERVALS
 
 # ---------------------------------------------------------------------------
 # Reconciliation thresholds (Requirements 10.5, 10.6, 10.7)
@@ -1237,6 +1241,9 @@ class HistoricalEngine:
                     "expiry": c.get("expiry"),
                     "strike": c.get("strike"),
                     "option_type": c.get("optionType"),
+                    # provenance fields — populated when available
+                    "underlying_id": c.get("underlyingId"),
+                    "source_timestamp": _coerce_to_datetime(c.get("sourceTimestamp")) if c.get("sourceTimestamp") else None,
                 }
             )
 
@@ -1252,14 +1259,16 @@ class HistoricalEngine:
                     open, high, low, close, volume,
                     volume_unavailable, provider, source_type,
                     dataset_version, session_date, normalisation_version,
-                    poor_quality, data_origin, quality_status
+                    poor_quality, data_origin, quality_status,
+                    source_timestamp
                 ) VALUES (
                     :instrument_id, :exchange, :segment, :interval_str, :time,
                     :open, :high, :low, :close, :volume,
                     :volume_unavailable, :provider, :source_type,
                     :dataset_version, :session_date, :normalisation_version,
                     :poor_quality, 'PROVIDER',
-                    CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END
+                    CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
+                    :source_timestamp
                 )
                 ON CONFLICT (instrument_id, exchange, interval_str, time)
                 DO UPDATE SET
@@ -1272,7 +1281,8 @@ class HistoricalEngine:
                     dataset_version       = EXCLUDED.dataset_version,
                     normalisation_version = EXCLUDED.normalisation_version,
                     poor_quality          = EXCLUDED.poor_quality,
-                    quality_status        = EXCLUDED.quality_status
+                    quality_status        = EXCLUDED.quality_status,
+                    source_timestamp      = COALESCE(EXCLUDED.source_timestamp, equity_candle.source_timestamp)
                 """
             )
         # ── futures_candle upsert ─────────────────────────────────────────
@@ -1285,7 +1295,7 @@ class HistoricalEngine:
                     provider, source_type,
                     dataset_version, session_date, normalisation_version,
                     poor_quality, data_origin, quality_status,
-                    expiry
+                    expiry, underlying_id, source_timestamp
                 ) VALUES (
                     :instrument_id, :exchange, :interval_str, :time,
                     :open, :high, :low, :close, :volume, :oi,
@@ -1293,7 +1303,7 @@ class HistoricalEngine:
                     :dataset_version, :session_date, :normalisation_version,
                     :poor_quality, 'PROVIDER',
                     CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
-                    :expiry
+                    :expiry, :underlying_id, :source_timestamp
                 )
                 ON CONFLICT (instrument_id, exchange, interval_str, time)
                 DO UPDATE SET
@@ -1307,7 +1317,9 @@ class HistoricalEngine:
                     dataset_version       = EXCLUDED.dataset_version,
                     normalisation_version = EXCLUDED.normalisation_version,
                     poor_quality          = EXCLUDED.poor_quality,
-                    quality_status        = EXCLUDED.quality_status
+                    quality_status        = EXCLUDED.quality_status,
+                    underlying_id         = COALESCE(EXCLUDED.underlying_id, futures_candle.underlying_id),
+                    source_timestamp      = COALESCE(EXCLUDED.source_timestamp, futures_candle.source_timestamp)
                 """
             )
         # ── options_candle upsert ─────────────────────────────────────────
@@ -1320,7 +1332,7 @@ class HistoricalEngine:
                     provider, source_type,
                     dataset_version, session_date, normalisation_version,
                     poor_quality, data_origin, quality_status,
-                    expiry, strike, option_type
+                    expiry, strike, option_type, underlying_id, source_timestamp
                 ) VALUES (
                     :instrument_id, :exchange, :interval_str, :time,
                     :open, :high, :low, :close, :volume, :oi,
@@ -1328,7 +1340,7 @@ class HistoricalEngine:
                     :dataset_version, :session_date, :normalisation_version,
                     :poor_quality, 'PROVIDER',
                     CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
-                    :expiry, :strike, :option_type
+                    :expiry, :strike, :option_type, :underlying_id, :source_timestamp
                 )
                 ON CONFLICT (instrument_id, exchange, interval_str, time)
                 DO UPDATE SET
@@ -1342,7 +1354,9 @@ class HistoricalEngine:
                     dataset_version       = EXCLUDED.dataset_version,
                     normalisation_version = EXCLUDED.normalisation_version,
                     poor_quality          = EXCLUDED.poor_quality,
-                    quality_status        = EXCLUDED.quality_status
+                    quality_status        = EXCLUDED.quality_status,
+                    underlying_id         = COALESCE(EXCLUDED.underlying_id, options_candle.underlying_id),
+                    source_timestamp      = COALESCE(EXCLUDED.source_timestamp, options_candle.source_timestamp)
                 """
             )
 
@@ -1407,13 +1421,11 @@ class HistoricalEngine:
             # OAuth credentials not yet configured.  Angel One covers NSE
             # indices (NIFTY, BANKNIFTY, etc.) via its own token IDs and is
             # available when authenticated — prefer it as the practical primary.
-            # Also: if the interval is not supported on Upstox basic plan
-            # (5m, 10m, 15m, 1h), route to Angel One which has full coverage.
             from src.core.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
             angel_available = bool(settings.angel_one_api_key and settings.angel_one_mpin)
-            upstox_available = bool(settings.upstox_access_token)
-            if upstox_available and interval in _UPSTOX_V2_SUPPORTED_INTERVALS:
+            upstox_available = bool(settings.upstox_access_token or settings.upstox_analytics_key)
+            if upstox_available and interval in _UPSTOX_V3_SUPPORTED_INTERVALS:
                 return ProviderId.UPSTOX
             if angel_available:
                 return ProviderId.ANGEL_ONE
@@ -1433,13 +1445,14 @@ class HistoricalEngine:
 
         if instrument_class in ("EQ", "FO"):
             # Angel One is primary for intraday (1m–1h).
-            # For EOD (1d, 1w, 1M) Upstox is equally good and also works with
-            # our basic plan — use Upstox when access token is available, as
-            # it returns full ISIN-keyed data with no token-lookup dependency.
+            # For EOD (1d, 1w, 1M) Upstox V3 is equally good — use it when
+            # an access token OR the long-lived analytics token is available,
+            # as V3 returns full ISIN-keyed data with OI at index 6.
             # If Upstox not configured, fall back to Jugaad (stock_df) for EQ 1d.
             from src.core.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            if interval in ("1d", "1w", "1M") and settings.upstox_access_token:
+            upstox_available = bool(settings.upstox_access_token or settings.upstox_analytics_key)
+            if interval in ("1d", "1w", "1M") and upstox_available:
                 return ProviderId.UPSTOX
             if interval in ("1d",) and instrument_class == "EQ":
                 # Jugaad (stock_df) works for EQ 1d when Upstox not configured
@@ -1649,7 +1662,7 @@ class HistoricalEngine:
                 return candles
 
             elif provider == ProviderId.UPSTOX:
-                from src.providers.adapters.upstox import UpstoxAdapter, UPSTOX_V2_CONFIRMED_INTERVALS  # noqa: PLC0415
+                from src.providers.adapters.upstox import UpstoxAdapter  # noqa: PLC0415
                 from src.core.settings import get_settings  # noqa: PLC0415
                 settings = get_settings()
                 if not settings.upstox_access_token:
@@ -1668,15 +1681,15 @@ class HistoricalEngine:
                     )
                     return []
 
-                # Check if this interval is supported on the plan
-                if interval not in _UPSTOX_V2_SUPPORTED_INTERVALS:
+                # Check if this interval is supported on V3
+                if interval not in _UPSTOX_V3_SUPPORTED_INTERVALS:
                     logger.warning(
-                        "upstox_interval_not_on_plan",
+                        "upstox_interval_not_supported",
                         component="historical_engine",
                         symbol=symbol,
                         interval=interval,
-                        supported=sorted(_UPSTOX_V2_SUPPORTED_INTERVALS),
-                        hint="Upgrade to Upstox Pro plan for 5m/10m/15m/1h; using Angel One fallback",
+                        supported=sorted(_UPSTOX_V3_SUPPORTED_INTERVALS),
+                        hint="Interval not in Upstox V3 supported set",
                     )
                     return []
 
