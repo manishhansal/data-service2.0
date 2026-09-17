@@ -2,7 +2,7 @@
 Upstox V3 provider adapter for DATA-SERVICE 2.0.
 
 Implements all relevant market-data APIs using the current Upstox V3 endpoints.
-V2 endpoints are only used where no V3 replacement exists (full market quotes).
+V2 endpoints are used only where no V3 replacement exists.
 
 API inventory covered:
   - OAuth2 token management (store, 401-refresh, retry)
@@ -11,13 +11,15 @@ API inventory covered:
   - Intraday Candle V3          GET /v3/historical-candle/intraday/{key}/{unit}/{interval}
   - LTP Quotes V3               GET /v3/market-quote/ltp
   - OHLC Quotes V3              GET /v3/market-quote/ohlc
-  - Full Market Quotes V2       GET /v2/market-quote/quotes  (still V2 — no V3 yet)
+  - Full Market Quotes V3       GET /v3/market-quote/quotes  (migrated Apr 2025, adds CAS fields)
   - Option Greeks V3            GET /v3/market-quote/option-greek  (max 50 per request)
   - Option Chain                GET /v2/option/chain
   - Option Contracts            GET /v2/option/contract
   - Exchange Status             GET /v2/market/status/{exchange}
   - Market Holidays             GET /v2/market/holidays
   - Market Timings              GET /v2/market/timings/{date}
+  - Market Information (new)    GET /v2/market/oi|pcr|max-pain|fii|dii|change-oi  (May 2026)
+  - Smartlist APIs (new)        GET /v2/market/smartlist/futures|options|mtf  (May 2026)
   - Instrument Search           GET /v2/instruments/search
   - Expired Instruments         GET /v2/expired-instruments/* (Upstox Plus)
   - Expired Historical Candle   GET /v2/expired-instruments/historical-candle/...
@@ -663,7 +665,7 @@ class UpstoxAdapter:
             return {}
 
     # ------------------------------------------------------------------
-    # Full Market Quotes — V2 (no V3 replacement yet)
+    # Full Market Quotes — V3 (migrated from V2, April 2025)
     # ------------------------------------------------------------------
 
     async def fetch_full_quote(
@@ -672,9 +674,12 @@ class UpstoxAdapter:
     ) -> dict[str, Any]:
         """Fetch comprehensive market quote data for up to 500 instruments.
 
-        Uses the V2 full-quote endpoint (no V3 equivalent exists as of
-        2026-09-16).  Returns OHLC, depth (5 levels buy/sell), volume,
-        net change, circuit limits, and OI (for F&O instruments).
+        Uses the V3 full-quote endpoint (migrated from V2 on April 17 2025).
+        V3 adds CAS (Closing Auction Session) fields — indicative_equilibrium_price,
+        indicative_equilibrium_quantity, total_indicative_quantity,
+        market_indicative_imbalance — present only during the CAS window.
+        Returns OHLC, depth (5 levels buy/sell), volume, net change, circuit
+        limits, OI (for F&O instruments), and CAS fields when applicable.
 
         Args:
             instrument_keys: List of Upstox instrument keys (max 500).
@@ -682,7 +687,8 @@ class UpstoxAdapter:
         Returns:
             Dict mapping instrument key → full quote fields:
             {last_price, ohlc, depth, timestamp, volume, net_change,
-             lower_circuit_limit, upper_circuit_limit, oi (F&O only)}.
+             lower_circuit_limit, upper_circuit_limit, oi (F&O only),
+             cas (CAS window only)}.
 
         Raises:
             ValueError:               If instrument_keys is empty or > 500.
@@ -694,11 +700,11 @@ class UpstoxAdapter:
         if len(instrument_keys) > 500:
             raise ValueError(f"Upstox full quote max 500 instruments; got {len(instrument_keys)}")
 
-        url = f"{UPSTOX_V2_BASE}/market-quote/quotes"
+        url = f"{UPSTOX_V3_BASE}/market-quote/quotes"
         joined = ",".join(instrument_keys)
 
         logger.info(  # type: ignore[attr-defined]
-            "upstox_full_quote_v2_request",
+            "upstox_full_quote_v3_request",
             component="upstox_adapter",
             count=len(instrument_keys),
         )
@@ -1182,6 +1188,357 @@ class UpstoxAdapter:
             })
 
         return candles
+
+    # ------------------------------------------------------------------
+    # Market Information APIs — launched May 11 2026
+    # ------------------------------------------------------------------
+
+    async def fetch_oi_data(
+        self,
+        instrument_key: str,
+        expiry: str,
+        date: str,
+    ) -> dict[str, Any]:
+        """Fetch Open Interest data for a derivative instrument.
+
+        Returns strike-level OI distribution for the given underlying,
+        expiry, and date.
+
+        Args:
+            instrument_key: Upstox underlying instrument key (e.g.
+                            ``"NSE_INDEX|Nifty 50"``).
+            expiry:         Expiry date as ``"YYYY-MM-DD"``.
+            date:           Date for which OI data is required as
+                            ``"YYYY-MM-DD"``.
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/oi"
+        response = await self._request(
+            "GET", url,
+            params={"instrument_key": instrument_key, "expiry": expiry, "date": date},
+        )
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    async def fetch_pcr_data(
+        self,
+        instrument_key: str,
+        expiry: str,
+        date: str,
+        bucket_interval: int,
+    ) -> dict[str, Any]:
+        """Fetch Put-Call Ratio (PCR) data for a derivative instrument.
+
+        Returns intraday PCR time-series bucketed at ``bucket_interval``
+        minutes for the given underlying, expiry, and date.
+
+        Args:
+            instrument_key: Upstox underlying instrument key.
+            expiry:         Expiry date as ``"YYYY-MM-DD"``.
+            date:           Date for which PCR data is required as
+                            ``"YYYY-MM-DD"``.
+            bucket_interval: Bucket interval in minutes for the time-series.
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/pcr"
+        response = await self._request(
+            "GET", url,
+            params={
+                "instrument_key": instrument_key,
+                "expiry": expiry,
+                "date": date,
+                "bucket_interval": bucket_interval,
+            },
+        )
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    async def fetch_max_pain(
+        self,
+        instrument_key: str,
+        expiry: str,
+        date: str,
+        bucket_interval: int,
+    ) -> dict[str, Any]:
+        """Fetch Max Pain data for a derivative instrument.
+
+        Returns the Max Pain strike and supporting metrics for the given
+        underlying, expiry, date, and bucket interval.
+
+        Args:
+            instrument_key: Upstox underlying instrument key.
+            expiry:         Expiry date as ``"YYYY-MM-DD"``.
+            date:           Date as ``"YYYY-MM-DD"``.
+            bucket_interval: Bucket interval in minutes for the insights list.
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/max-pain"
+        response = await self._request(
+            "GET", url,
+            params={
+                "instrument_key": instrument_key,
+                "expiry": expiry,
+                "date": date,
+                "bucket_interval": bucket_interval,
+            },
+        )
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    async def fetch_change_oi(
+        self,
+        instrument_key: str,
+        expiry: str,
+        date: str,
+        interval: int,
+    ) -> dict[str, Any]:
+        """Fetch Change in Open Interest data for a derivative instrument.
+
+        Returns the per-strike change in OI for the given underlying, expiry,
+        date, and comparison interval (in days).
+
+        Args:
+            instrument_key: Upstox underlying instrument key.
+            expiry:         Expiry date as ``"YYYY-MM-DD"``.
+            date:           Date as ``"YYYY-MM-DD"``.
+            interval:       Number of days for the OI difference comparison.
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/change-oi"
+        response = await self._request(
+            "GET", url,
+            params={
+                "instrument_key": instrument_key,
+                "expiry": expiry,
+                "date": date,
+                "interval": interval,
+            },
+        )
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    async def fetch_fii_data(
+        self,
+        data_type: str,
+        interval: str,
+        from_date: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Fetch FII (Foreign Institutional Investor) activity data.
+
+        Args:
+            data_type:  Segment type.  Allowed values:
+                        ``"NSE_FO|INDEX_FUTURES"``, ``"NSE_FO|STOCK_FUTURES"``,
+                        ``"NSE_FO|INDEX_OPTIONS"``, ``"NSE_FO|STOCK_OPTIONS"``,
+                        ``"NSE_EQ|CASH"``.
+            interval:   Aggregation interval.  Allowed values: ``"1D"``, ``"1M"``.
+            from_date:  Optional start date as ``"YYYY-MM-DD"``.
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/fii"
+        params: dict[str, Any] = {"data_type": data_type, "interval": interval}
+        if from_date is not None:
+            params["from"] = from_date
+        response = await self._request("GET", url, params=params)
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    async def fetch_dii_data(
+        self,
+        data_type: str,
+        interval: str,
+        from_date: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Fetch DII (Domestic Institutional Investor) activity data.
+
+        Args:
+            data_type:  Segment type.  Currently only ``"NSE_EQ|CASH"``
+                        is supported.
+            interval:   Aggregation interval.  Allowed values: ``"1D"``, ``"1M"``.
+            from_date:  Optional start date as ``"YYYY-MM-DD"``.
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/dii"
+        params: dict[str, Any] = {"data_type": data_type, "interval": interval}
+        if from_date is not None:
+            params["from"] = from_date
+        response = await self._request("GET", url, params=params)
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    # ------------------------------------------------------------------
+    # Smartlist APIs — launched May 29 2026
+    # ------------------------------------------------------------------
+
+    async def fetch_smartlist_futures(
+        self,
+        asset_type: Optional[str] = None,
+        category: Optional[str] = None,
+        page_number: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Fetch the curated Smartlist of futures contracts.
+
+        Returns a ranked list of F&O futures enriched with live LTP data.
+
+        Args:
+            asset_type:   Optional asset type filter.  Allowed values:
+                          ``"INDEX"``, ``"STOCK"``, ``"COMMODITY"``.
+            category:     Optional ranking category.  Allowed values:
+                          ``"TOP_TRADED"``, ``"MOST_ACTIVE"``, ``"OI_GAINERS"``,
+                          ``"OI_LOSERS"``, ``"PRICE_GAINERS"``, ``"PRICE_LOSERS"``,
+                          ``"PREMIUM"``, ``"DISCOUNT"``.
+                          Commodity supports only TOP_TRADED, MOST_ACTIVE,
+                          OI_GAINERS, OI_LOSERS.
+            page_number:  1-indexed page number (optional).
+            page_size:    Items per page, max 50 (optional).
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/smartlist/futures"
+        params: dict[str, Any] = {}
+        if asset_type is not None:
+            params["asset_type"] = asset_type
+        if category is not None:
+            params["category"] = category
+        if page_number is not None:
+            params["page_number"] = page_number
+        if page_size is not None:
+            params["page_size"] = page_size
+        response = await self._request("GET", url, params=params)
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    async def fetch_smartlist_options(
+        self,
+        asset_type: Optional[str] = None,
+        category: Optional[str] = None,
+        page_number: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Fetch the curated Smartlist of options contracts.
+
+        Returns a ranked list of F&O option contracts enriched with live data.
+
+        Args:
+            asset_type:   Optional asset type filter.  Allowed values:
+                          ``"INDEX"``, ``"STOCK"``, ``"COMMODITY"``.
+            category:     Optional ranking category.  Allowed values:
+                          ``"TOP_TRADED"``, ``"MOST_ACTIVE"``, ``"OI_GAINERS"``,
+                          ``"OI_LOSERS"``, ``"PRICE_GAINERS"``, ``"PRICE_LOSERS"``,
+                          ``"IV_GAINERS"``, ``"IV_LOSERS"``, ``"UNDER_5000"``,
+                          ``"UNDER_10000"``.
+            page_number:  1-indexed page number (optional).
+            page_size:    Items per page, max 50 (optional).
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/smartlist/options"
+        params: dict[str, Any] = {}
+        if asset_type is not None:
+            params["asset_type"] = asset_type
+        if category is not None:
+            params["category"] = category
+        if page_number is not None:
+            params["page_number"] = page_number
+        if page_size is not None:
+            params["page_size"] = page_size
+        response = await self._request("GET", url, params=params)
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
+
+    async def fetch_smartlist_mtf(
+        self,
+        page_number: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Fetch the curated Smartlist of MTF (Margin Trade Funding) eligible stocks.
+
+        Returns stocks eligible for margin funding, enriched with live LTP.
+
+        Args:
+            page_number:  1-indexed page number (optional).
+            page_size:    Items per page, max 50 (optional).
+
+        Returns:
+            Raw ``data`` dict from the Upstox API.
+
+        Raises:
+            ProviderAuthError:        On token failure.
+            ProviderRateLimitedError: On HTTP 429.
+        """
+        url = f"{UPSTOX_V2_BASE}/market/smartlist/mtf"
+        params: dict[str, Any] = {}
+        if page_number is not None:
+            params["page_number"] = page_number
+        if page_size is not None:
+            params["page_size"] = page_size
+        response = await self._request("GET", url, params=params)
+        try:
+            return dict(response.get("data") or {})
+        except (KeyError, TypeError):
+            return {}
 
     # ------------------------------------------------------------------
     # Lifecycle
