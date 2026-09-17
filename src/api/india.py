@@ -1349,9 +1349,7 @@ async def _query_candles(
     # When futures_candle and options_candle are populated, the router will
     # use exchange/instrument_class to select the right table.
     if exchange.upper() in ("NFO", "BFO"):
-        # F&O instruments — query futures_candle first, fall back to options_candle
-        # if the instrument has a strike (options). For now, since F&O data
-        # has not yet been backfilled, we query futures_candle.
+        # F&O instruments — query futures_candle first
         select_sql = text(
             """
             SELECT
@@ -1359,7 +1357,7 @@ async def _query_candles(
                 open, high, low, close, volume,
                 open_interest AS oi,
                 FALSE AS volume_unavailable,
-                provider, poor_quality,
+                provider, source_type, poor_quality,
                 normalisation_version, session_date
             FROM futures_candle
             WHERE instrument_id = :instrument_id
@@ -1374,13 +1372,15 @@ async def _query_candles(
         )
     else:
         # NSE/BSE equities and indices → equity_candle
+        # NOTE: equity_candle has no open_interest column (equities have no OI).
+        # Index instruments (NIFTY, BANKNIFTY) also have no OI in candle data.
         select_sql = text(
             """
             SELECT
                 EXTRACT(EPOCH FROM time)::bigint AS time_epoch,
                 open, high, low, close, volume,
                 NULL::bigint AS oi,
-                volume_unavailable, provider, poor_quality,
+                volume_unavailable, provider, source_type, poor_quality,
                 normalisation_version, session_date
             FROM equity_candle
             WHERE instrument_id = :instrument_id
@@ -1436,6 +1436,8 @@ async def _query_candles(
                 "volume": int(row.volume),
                 "oi": int(row.oi) if row.oi is not None else None,
                 "volumeUnavailable": bool(row.volume_unavailable),
+                "provider": str(row.provider),
+                "sourceType": str(row.source_type) if row.source_type else None,
             }
         )
 
@@ -1474,6 +1476,104 @@ def _parse_iso_datetime(value: str) -> datetime:
         return dt.astimezone(timezone.utc)
     except ValueError:
         raise ValueError(f"Cannot parse datetime: {value!r}")
+
+
+# ---------------------------------------------------------------------------
+# Persistence helpers — option_greeks_snapshot
+# ---------------------------------------------------------------------------
+
+
+async def _persist_option_greeks(
+    greeks_map: dict[str, Any],
+    *,
+    db_engine: Any,
+    received_at: str,
+) -> None:
+    """Persist a batch of normalised option Greeks to ``option_greeks_snapshot``.
+
+    Called fire-and-forget from the Greeks REST endpoint.
+    Silently logs and returns on any DB error.
+
+    Args:
+        greeks_map:   Dict of {instrument_key → normalized_greeks_dict}.
+        db_engine:    Async SQLAlchemy engine.
+        received_at:  UTC ISO-8601 timestamp of the fetch.
+    """
+    if not db_engine or not greeks_map:
+        return
+
+    from sqlalchemy import text as _text  # noqa: PLC0415
+    import datetime as _dt  # noqa: PLC0415
+
+    try:
+        ts = _dt.datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_dt.timezone.utc)
+    except (ValueError, AttributeError):
+        ts = _dt.datetime.now(_dt.timezone.utc)
+
+    session_date = ts.astimezone(
+        _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+    ).date()
+
+    upsert_sql = _text(
+        """
+        INSERT INTO option_greeks_snapshot (
+            instrument_id, instrument_key, timestamp, session_date,
+            ltp, option_price, prev_close,
+            oi, volume, ltq,
+            iv, delta, gamma, theta, vega, rho,
+            calculation_method, provider, received_at, quality_status
+        ) VALUES (
+            :instrument_id, :instrument_key, :timestamp, :session_date,
+            :ltp, :ltp, :prev_close,
+            :oi, :volume, :ltq,
+            :iv, :delta, :gamma, :theta, :vega, :rho,
+            'PROVIDER', :provider, :received_at, 'TRUSTED'
+        )
+        ON CONFLICT DO NOTHING
+        """
+    )
+
+    rows = []
+    for key, g in greeks_map.items():
+        if not g:
+            continue
+        oi_val = g.get("oi") if not g.get("oiMissing", True) else None
+        rows.append({
+            "instrument_id":   g.get("instrumentId") or key,
+            "instrument_key":  key,
+            "timestamp":       ts,
+            "session_date":    session_date,
+            "ltp":             g.get("ltp"),
+            "prev_close":      g.get("prevClose"),
+            "oi":              oi_val,
+            "volume":          g.get("volume"),
+            "ltq":             g.get("lastTradeQty"),
+            "iv":              g.get("iv"),
+            "delta":           g.get("delta"),
+            "gamma":           g.get("gamma"),
+            "theta":           g.get("theta"),
+            "vega":            g.get("vega"),
+            "rho":             g.get("rho"),
+            "provider":        g.get("provider") or "upstox",
+            "received_at":     ts,
+        })
+
+    if not rows:
+        return
+
+    try:
+        async with db_engine.begin() as conn:
+            for row in rows:
+                await conn.execute(upsert_sql, row)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "option_greeks_persist_failed",
+            component="india_api",
+            count=len(rows),
+            error=str(exc),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1586,6 +1686,14 @@ async def get_option_greeks(
         if normalized:
             freshness.classify(normalized)
             results[key] = normalized
+
+    # Persist Greeks to option_greeks_snapshot (fire-and-forget)
+    db_engine = getattr(request.app.state, "db_engine", None)
+    if db_engine is not None and results:
+        import asyncio as _asyncio  # noqa: PLC0415
+        _asyncio.ensure_future(
+            _persist_option_greeks(results, db_engine=db_engine, received_at=received_at)
+        )
 
     return _json_response(
         _success_envelope(
