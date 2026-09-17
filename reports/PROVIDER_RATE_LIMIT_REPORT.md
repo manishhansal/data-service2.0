@@ -1,54 +1,59 @@
 # PROVIDER RATE LIMIT REPORT
-## data-service2.0 — Phase 51 Report
+## data-service2.0
 
-**Report date:** 2026-09-17  
-**Scope:** Rate limiter implementation review and live verification status  
-**Evidence basis:** Static codebase analysis + unit tests. No live load test executed.
+**Report date:** 2026-09-17 (Phase 51) — **Updated:** 2026-09-17 (Phase B-K remediation)
+**Scope:** Rate limiter implementation and verification status
+**Evidence basis:** Static codebase analysis + unit tests. Live load test not yet executed.
 
 ---
 
 ## STATUS
 
 ```
-NOT_VERIFIED_LIVE — unit-tested only
+IMPLEMENTED — hierarchical 3-window rate limiting (50/s + 500/min + 2000/30min)
+NOT_VERIFIED_LIVE — realistic load test with live provider not yet executed
 ```
+
+**SUPERSEDES:** Previous status "NOT_VERIFIED_LIVE — unit-tested only, 500/min and 2000/30min NOT enforced".
 
 ---
 
 ## CONFIGURED RATE LIMITS
 
-| Provider | Configured limit | Documented limit | Correct? |
-|---------|-----------------|-----------------|---------|
-| Angel One | 3.0 req/s | 3.0 req/s | ✅ Matches |
-| Upstox | 50.0 req/s | 50 req/s, 500/min, 2000/30min | ✅ RPS matches. Per-minute and per-30-min quotas NOT separately enforced (see gap below). |
+| Provider | Bucket 1 (req/s) | Bucket 2 (req/min) | Bucket 3 (req/30min) | Correct? |
+|---------|-----------------|---------------------|----------------------|---------|
+| Angel One | 3.0 req/s | N/A | N/A | Yes |
+| Upstox | 50.0 req/s | 500/min (FIXED) | 2000/30min (FIXED) | Yes — all 3 windows |
 
-### Upstox quota gap
-
-Upstox has three distinct rate limits:
-1. 50 requests/second
-2. 500 requests/minute
-3. 2,000 requests/30 minutes
-
-The current implementation enforces only the **50 req/s** token bucket. The per-minute and per-30-minute quotas are not independently tracked. Under burst scenarios where 50 req/s is sustained for >10 seconds, the per-minute quota (500) would be exceeded.
-
-**Risk:** Under backfill load (sustained API calls for multiple symbols), Upstox 429s may occur at the per-minute level even though the per-second limiter is satisfied.
-
-**Severity:** Medium — affects backfill throughput. Historical requests would receive 429, which are retried with backoff. No data loss, but backfill may be slower than expected.
+**FIXED (2026-09-17):** `HierarchicalRateLimiter` class added to `rate_limiter.py`.
+All three Upstox quotas are now independently enforced using Redis sorted-set sliding windows.
 
 ---
 
-## RATE LIMITER IMPLEMENTATION
+## IMPLEMENTATION — HierarchicalRateLimiter
 
 | Feature | Status | Evidence |
 |---------|--------|---------|
-| Token bucket algorithm | `UT` | `TokenBucketRateLimiter` in `rate_limiter.py` |
-| Redis-backed (cross-replica) | `UT` | Lua atomic script; `test_rate_limiter.py` |
-| Local fallback when Redis unavailable | `UT` | `_LocalBucket` fallback |
-| 429 not counted in circuit breaker | `UT` | `record_rate_limit()` is a no-op vs failure |
-| Per-provider separate bucket | `UT` | Keys are provider-namespaced |
-| Burst behavior | `UT` | Token refill rate = configured req/s |
+| Bucket 1: 50 req/s (token bucket) | IMPLEMENTED | `TokenBucketRateLimiter`, Redis-backed |
+| Bucket 2: 500 req/min (sliding window) | FIXED | `HierarchicalRateLimiter`, sorted-set ZREMRANGEBYSCORE |
+| Bucket 3: 2000 req/30min (sliding window) | FIXED | Same, 1800s window |
+| Per-provider (Upstox only for multi-window) | IMPLEMENTED | `provider_id == "upstox"` check |
+| Redis pipeline (atomic count) | IMPLEMENTED | `pipe.zremrangebyscore` + `pipe.zcard` |
+| Jitter in `acquire()` loop | IMPLEMENTED | `random.uniform(0.0, 0.02)` |
+| Graceful Redis failure fallback | IMPLEMENTED | Logs warning, per-second bucket still enforced |
+| `get_window_usage()` diagnostics | IMPLEMENTED | Returns current count, limit, remaining per window |
 
 ---
+
+## REMAINING GAP
+
+| Gap | Status |
+|-----|--------|
+| Realistic load test (sustained 50 req/s for 30s) | NOT_EXECUTED — requires live provider + credentials |
+| p50/p95/p99 latency under load | NOT_MEASURED |
+| 429 rate limit hit under burst | NOT_VERIFIED_LIVE |
+
+A load test harness exists at `locustfile.py`. Live execution requires provider credentials and is separate from unit testing.
 
 ## ANGEL ONE RATE LIMIT TEST PROCEDURE
 

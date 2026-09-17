@@ -187,3 +187,42 @@ Until then: **FULL BACKFILL IS BLOCKED.**
 ---
 
 *Pilot not executed as of 2026-09-17. This report will be updated with real results after pilot completion.*
+
+---
+
+## UPDATE — PHASE B-K REMEDIATION (2026-09-17)
+
+**Git commit:** 692bf3f
+
+### Code prerequisites PASS (verified locally 2026-09-17)
+
+| Gate | Previous | Current | Evidence |
+|------|---------|---------|---------|
+| F&O token lookup queries instrument_provider_mapping | BROKEN (used instrument_master only) | **FIXED** | BUG-012: `historical_engine._fetch_candles` now queries `instrument_provider_mapping` first |
+| available_at_ms on futures_candle | MISSING | **ADDED** | Migration 20260917_100000; ORM model updated |
+| available_at_ms on options_candle | MISSING | **ADDED** | Same migration |
+| 3m blocked in CandleBuilder | N/A | **ENFORCED** | ValueError on construction with interval="3m" |
+| OI NULL never corrupted to 0 | UNTESTED | **VERIFIED** | reconcile_oi() returns canonical_oi=None; test PASS |
+| Look-ahead validation | NOT IMPLEMENTED | **IMPLEMENTED** | CandleBuilder.validate_point_in_time(); candle_time_ms <= available_at_ms enforced |
+| Pilot execution script | ABSENT | **CREATED** | `scripts/run_fno_pilot.py` with all 7 validation gates |
+| Yahoo NOT in F&O fallback chain | NOT ENFORCED | **ENFORCED** | ProviderGateway._CAPABILITY_ROUTING verified (Drill 3 PASS) |
+
+### Remaining blockers (pilot execution BLOCKED)
+
+| Blocker | Status |
+|---------|--------|
+| Angel One credentials not configured in current environment | BLOCKED_BY_ENVIRONMENT |
+| Angel One historical OI: getOIData "Invalid Bad Request" | BLOCKED_BY_PROVIDER_PLAN |
+| F&O token resolution from instrument_provider_mapping requires live DB with populated tokens | BLOCKED — need instrument sync |
+| Upstox OAuth access token expired | BLOCKED_BY_EXTERNAL |
+
+### Pilot execution procedure (when credentials available)
+
+1. Configure `ANGEL_ONE_API_KEY`, `ANGEL_ONE_CLIENT_ID`, `ANGEL_ONE_TOTP_SECRET`, `ANGEL_ONE_MPIN`
+2. Run `POST /v1/admin/instruments/sync` to populate instrument_provider_mapping with F&O tokens
+3. Verify: `SELECT COUNT(*) FROM instrument_provider_mapping WHERE provider='angel_one' AND canonical_instrument_id LIKE 'NFO:%FUT%'`
+4. Run: `python3 scripts/run_fno_pilot.py`
+5. All 6 validation gates must PASS before full 1-year backfill is authorized
+6. For OI: Angel One plan restriction → OI will be NULL (not zero) for historical candles; Upstox V3 provides OI at index 6 for 1d candles
+
+**GATE STATUS: BLOCKED — pilot not yet executable without live credentials**

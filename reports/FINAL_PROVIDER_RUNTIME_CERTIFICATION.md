@@ -377,3 +377,54 @@ All quality invariants passed:
 ---
 
 *Evidence: Docker container live calls 2026-09-17T04:12–04:20Z. 4,397 unit tests passing. No credentials logged or reproduced.*
+
+---
+
+## PART 8 — PHASE B-K REMEDIATION UPDATE (2026-09-17)
+
+**Git commit:** 692bf3f (branch fix/bugs)
+**Updated:** 2026-09-17
+
+### New fixes applied this session
+
+| Fix | File(s) changed | Verified |
+|-----|----------------|---------|
+| BUG-012: Angel F&O token lookup queries instrument_provider_mapping (covers F&O) before instrument_master (EQ only) | `historical_engine.py` | Code review |
+| BUG-013: Upstox pb2 generated and working | `upstox_market_data_feeder_pb2.py` | `_try_import_pb2()` returns module locally |
+| BUG-014: ProviderGateway.fetch() now real dispatch, not NotImplementedError stub | `gateway.py` | Unit tests pass |
+| BUG-015: Upstox OAuth multi-worker sharing via Redis (distributed lock, 23h TTL) | `upstox.py` | Code review |
+| BUG-016: HierarchicalRateLimiter: 500/min + 2000/30min buckets added | `rate_limiter.py` | Unit tests |
+| BUG-017: CandleBuilder created (tick → OHLCV aggregation for 1m–1h) | `candle_builder.py` | 24 new unit tests PASS |
+| BUG-018: TickPersister created (market_tick + candle DB writes from live streams) | `tick_persister.py` | Code review |
+| BUG-019: Stream adapters wired to TickPersister in server startup | `server.py` | Code review |
+| BUG-020: available_at_ms added to all 3 candle models + migration | `candles.py`, migration | Code review |
+| BUG-021: OI reconciliation (reconcile_oi()) — NULL preserved, never zero | `reconciliation_engine.py` | Unit tests |
+| BUG-022: Upstox _fetch_candles uses analytics_key as fallback | `historical_engine.py` | Code review |
+| BUG-023: server.py Upstox init: accepts analytics_key OR access_token | `server.py` | Code review |
+
+### Test results post-Phase B-K
+
+| Suite | Tests | Status |
+|-------|-------|--------|
+| unit/providers/ + property/ | 1,198 | PASS |
+| unit/engines/test_candle_builder.py | 24 | PASS |
+| Full unit + property + mocks | 4,564 | PASS (0 failures) |
+
+### Updated production blockers
+
+| # | Blocker | Severity | Status |
+|---|---------|----------|--------|
+| B1 | Upstox OAuth access token expired 2026-09-14 | P0 | OUTSTANDING — OAuth callback required |
+| B2 | SmartStream (Angel One) not validated live | P1 | OUTSTANDING — requires market hours |
+| B3 | Upstox WS live binary frame not decoded live | P1 | OUTSTANDING — blocked by expired token |
+| B4 | Angel One getOIData plan restriction | P1 | OUTSTANDING — contact Angel One support |
+| B5 | F&O 30-day pilot not started | P1 | OUTSTANDING — blocked by B1 + token sync |
+| B6 | Redis ACL not configured | P2 | OUTSTANDING |
+| ~~B3~~ | ~~MarketEngine symbol→token lookup~~ | ~~P1~~ | ~~FIXED (BUG-001)~~ |
+| ~~B9~~ | ~~PCR schema mismatch~~ | ~~P2~~ | ~~FIXED (BUG-002)~~ |
+| ~~pb2~~ | ~~Upstox pb2 absent~~ | ~~P0~~ | ~~FIXED (BUG-013)~~ |
+| ~~gateway~~ | ~~ProviderGateway stub~~ | ~~P2~~ | ~~FIXED (BUG-014)~~ |
+| ~~rate~~ | ~~500/min + 2000/30min not enforced~~ | ~~P1~~ | ~~FIXED (BUG-016)~~ |
+| ~~stream~~ | ~~No streaming→market_tick path~~ | ~~P0~~ | ~~FIXED (BUG-017/018/019)~~ |
+| ~~pit~~ | ~~No available_at_ms in candle models~~ | ~~P2~~ | ~~FIXED (BUG-020)~~ |
+| ~~oi-recon~~ | ~~No OI reconciliation~~ | ~~P2~~ | ~~FIXED (BUG-021)~~ |
