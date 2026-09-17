@@ -181,6 +181,17 @@ class UpstoxNormalizer:
         # Last trade qty (present in some quote types)
         ltq = _safe_int(raw.get("last_quantity") or raw.get("ltq"))
 
+        # Total buy/sell quantities (present in V2 full quote)
+        total_buy_qty  = _safe_int(raw.get("total_buy_quantity") or raw.get("tbq"))
+        total_sell_qty = _safe_int(raw.get("total_sell_quantity") or raw.get("tsq"))
+
+        # 52-week high/low (present in V2/V3 full quote)
+        week_high_52 = _safe_float(raw.get("52_week_high") or raw.get("week_high") or raw.get("high_52"))
+        week_low_52  = _safe_float(raw.get("52_week_low")  or raw.get("week_low")  or raw.get("low_52"))
+
+        # ATP (average traded price) — present in some full quote modes
+        avg_traded_price = _safe_float(raw.get("average_price") or raw.get("atp"))
+
         return {
             "instrumentId":       instrument_id,
             "instrumentKey":      instrument_key,
@@ -204,6 +215,11 @@ class UpstoxNormalizer:
             "depthSell":          depth_sell,
             "depthLevels":        5,
             "lastTradeQty":       ltq,
+            "totalBuyQty":        total_buy_qty,
+            "totalSellQty":       total_sell_qty,
+            "weekHigh52":         week_high_52,
+            "weekLow52":          week_low_52,
+            "avgTradedPrice":     avg_traded_price,
             "sourceTimestamp":    source_timestamp,
             "receivedAt":         received_at,
         }
