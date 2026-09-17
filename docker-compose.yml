@@ -24,7 +24,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: data-service:2.0.0
+    image: data-service:2.1.0
     container_name: data-service-api
     restart: unless-stopped
     ports:
@@ -105,7 +105,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: data-service:2.0.0
+    image: data-service:2.1.0
     container_name: data-service-worker
     restart: unless-stopped
     command: ["python", "-m", "src.worker"]
@@ -159,7 +159,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: data-service:2.0.0
+    image: data-service:2.1.0
     container_name: data-service-scheduler
     restart: unless-stopped
     command: ["python", "-m", "src.scheduler"]
