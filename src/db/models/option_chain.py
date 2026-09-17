@@ -221,6 +221,10 @@ class OptionGreeksSnapshot(Base):
 
     id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_key: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True,
+        comment="Provider instrument key (e.g. NSE_FO|43885)",
+    )
     timestamp: Mapped[datetime.datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
     )
@@ -229,6 +233,27 @@ class OptionGreeksSnapshot(Base):
     )
     option_price: Mapped[Optional[float]] = mapped_column(
         Numeric(precision=18, scale=6), nullable=True
+    )
+    # Convenience alias — LTP is semantically clearer for Greeks snapshots
+    ltp: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Last traded price (same as option_price; preferred field name)",
+    )
+    prev_close: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Previous session close price",
+    )
+    oi: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="Open interest — NULL when absent; never zero-substituted",
+    )
+    volume: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="Traded volume today",
+    )
+    ltq: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="Last traded quantity",
     )
     # All Greeks NULL when not available — zero PROHIBITED
     iv: Mapped[Optional[float]] = mapped_column(

@@ -27,6 +27,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.sqltypes import TIMESTAMP
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 from src.db.models.base import Base
 
@@ -205,12 +207,37 @@ class MarketQuote(Base):
     session_date: Mapped[Optional[datetime.date]] = mapped_column(
         Date(), nullable=True
     )
+    # ── Added columns ─────────────────────────────────────────────────────
+    depth_json: Mapped[Optional[dict]] = mapped_column(
+        postgresql.JSONB(astext_type=sa.Text()), nullable=True,
+        comment="Market depth buy/sell levels serialised as JSON",
+    )
+    source_type: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True,
+        comment="BROKER_AUTHENTICATED | OPEN_SOURCE_NSE_DERIVED",
+    )
+    change: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Price change vs previous close",
+    )
+    change_pct: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=10, scale=4), nullable=True,
+        comment="Percentage change vs previous close",
+    )
+    avg_traded_price: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Average traded price (ATP)",
+    )
 
     __table_args__ = (
         CheckConstraint(_QUALITY_STATUS_CHECK, name="mq_quality_status_valid"),
         Index(
             "mq_instrument_timestamp",
             "instrument_id", text("timestamp DESC"),
+        ),
+        sa.UniqueConstraint(
+            "instrument_id", "exchange", "timestamp", "provider",
+            name="mq_instrument_exchange_ts_provider_uq",
         ),
     )
 
