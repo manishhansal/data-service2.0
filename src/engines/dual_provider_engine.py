@@ -100,6 +100,13 @@ class DualProviderEngine:
         # Stores normalized + reconciled output to serve non-REGULAR sessions
         self._quote_cache: dict[str, dict[str, Any]] = {}
 
+        # DB engine — injected post-construction for option chain persistence
+        self._db_engine: Optional[Any] = None
+
+    def set_db_engine(self, db_engine: Any) -> None:
+        """Inject the async DB engine for option chain persistence."""
+        self._db_engine = db_engine
+
     # ------------------------------------------------------------------
     # Public: dual-provider live quote
     # ------------------------------------------------------------------
@@ -296,7 +303,7 @@ class DualProviderEngine:
                 for c in contracts:
                     c["isAtm"] = c.get("strike") == atm_strike
 
-        return {
+        result = {
             "underlying":    underlying,
             "expiry":        expiry,
             "exchange":      exchange,
@@ -313,6 +320,23 @@ class DualProviderEngine:
                 "grecksSource": "provider",
             },
         }
+
+        # Persist snapshot + contracts to DB (fire-and-forget)
+        if self._db_engine is not None and contracts:
+            import asyncio as _asyncio  # noqa: PLC0415
+            _asyncio.ensure_future(
+                _persist_option_chain(
+                    result,
+                    db_engine=self._db_engine,
+                    underlying=underlying,
+                    exchange=exchange,
+                    expiry=expiry,
+                    spot_price=spot_price,
+                    received_at=received_at,
+                )
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # Public: option Greeks (batch, from Upstox V3)
@@ -520,3 +544,155 @@ def _empty_dual_quote(
         "reconciliation": {"classification": "MISSING"},
         "provenance":     {"angelOneAvailable": False, "upstoxAvailable": False},
     }
+
+
+# ---------------------------------------------------------------------------
+# Persistence helper — option_chain_snapshot + option_chain_contract
+# ---------------------------------------------------------------------------
+
+_DP_LOGGER = get_logger(__name__ + ".persist")
+
+
+async def _persist_option_chain(
+    chain_result: dict[str, Any],
+    *,
+    db_engine: Any,
+    underlying: str,
+    exchange: str,
+    expiry: str,
+    spot_price: Optional[float],
+    received_at: str,
+) -> None:
+    """Persist an option chain snapshot and its contracts to the DB.
+
+    Inserts one row into ``option_chain_snapshot`` and one row per
+    (strike, option_type) into ``option_chain_contract``.  Uses
+    ON CONFLICT DO NOTHING so repeated calls for the same snapshot
+    timestamp are idempotent.
+
+    Silently logs and returns on any DB error.
+    """
+    if not db_engine:
+        return
+
+    from sqlalchemy import text as _text  # noqa: PLC0415
+    import datetime as _dt  # noqa: PLC0415
+
+    contracts = chain_result.get("contracts") or []
+    if not contracts:
+        return
+
+    try:
+        ts = _dt.datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_dt.timezone.utc)
+    except (ValueError, AttributeError):
+        ts = _dt.datetime.now(_dt.timezone.utc)
+
+    session_date = ts.astimezone(
+        _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+    ).date()
+
+    try:
+        expiry_date = _dt.date.fromisoformat(expiry)
+    except ValueError:
+        _DP_LOGGER.warning("option_chain_persist_bad_expiry", expiry=expiry)
+        return
+
+    # Compute analytics
+    total_ce_oi = sum(
+        (c.get("oi") or 0) for c in contracts if c.get("optionType") == "CE"
+    )
+    total_pe_oi = sum(
+        (c.get("oi") or 0) for c in contracts if c.get("optionType") == "PE"
+    )
+    pcr_oi = (total_pe_oi / total_ce_oi) if total_ce_oi > 0 else None
+
+    insert_snapshot = _text(
+        """
+        INSERT INTO option_chain_snapshot (
+            underlying_id, exchange, timestamp, expiry,
+            spot_price, provider, received_at,
+            pcr_oi, total_ce_oi, total_pe_oi, session_date, quality_status
+        ) VALUES (
+            :underlying_id, :exchange, :timestamp, :expiry,
+            :spot_price, :provider, :received_at,
+            :pcr_oi, :total_ce_oi, :total_pe_oi, :session_date, 'TRUSTED'
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING snapshot_id
+        """
+    )
+
+    insert_contract = _text(
+        """
+        INSERT INTO option_chain_contract (
+            snapshot_id, strike, option_type,
+            ltp, volume, open_interest, oi_change,
+            bid, ask, bid_quantity, ask_quantity,
+            iv, delta, gamma, theta, vega, is_atm
+        ) VALUES (
+            :snapshot_id, :strike, :option_type,
+            :ltp, :volume, :open_interest, :oi_change,
+            :bid, :ask, :bid_quantity, :ask_quantity,
+            :iv, :delta, :gamma, :theta, :vega, :is_atm
+        )
+        ON CONFLICT DO NOTHING
+        """
+    )
+
+    try:
+        async with db_engine.begin() as conn:
+            snap_row = await conn.execute(
+                insert_snapshot,
+                {
+                    "underlying_id": f"{exchange.upper()}:{underlying.upper()}",
+                    "exchange": exchange.upper(),
+                    "timestamp": ts,
+                    "expiry": expiry_date,
+                    "spot_price": spot_price,
+                    "provider": "upstox",
+                    "received_at": ts,
+                    "pcr_oi": round(pcr_oi, 4) if pcr_oi is not None else None,
+                    "total_ce_oi": total_ce_oi or None,
+                    "total_pe_oi": total_pe_oi or None,
+                    "session_date": session_date,
+                },
+            )
+            snapshot_row = snap_row.fetchone()
+            if snapshot_row is None:
+                # Snapshot already exists (ON CONFLICT DO NOTHING)
+                return
+            snapshot_id = snapshot_row[0]
+
+            for c in contracts:
+                oi_val = c.get("oi") if not c.get("oiMissing", False) else None
+                await conn.execute(
+                    insert_contract,
+                    {
+                        "snapshot_id": snapshot_id,
+                        "strike": c.get("strike"),
+                        "option_type": c.get("optionType") or c.get("option_type"),
+                        "ltp": c.get("ltp"),
+                        "volume": c.get("volume"),
+                        "open_interest": oi_val,
+                        "oi_change": c.get("oiChange"),
+                        "bid": c.get("bid"),
+                        "ask": c.get("ask"),
+                        "bid_quantity": c.get("bidQty"),
+                        "ask_quantity": c.get("askQty"),
+                        "iv": c.get("iv"),
+                        "delta": c.get("delta"),
+                        "gamma": c.get("gamma"),
+                        "theta": c.get("theta"),
+                        "vega": c.get("vega"),
+                        "is_atm": bool(c.get("isAtm", False)),
+                    },
+                )
+    except Exception as exc:  # noqa: BLE001
+        _DP_LOGGER.warning(
+            "option_chain_persist_failed",
+            component="dual_provider_engine",
+            underlying=underlying,
+            error=str(exc),
+        )
