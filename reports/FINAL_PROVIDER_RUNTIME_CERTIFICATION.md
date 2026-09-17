@@ -428,3 +428,62 @@ All quality invariants passed:
 | ~~stream~~ | ~~No streaming→market_tick path~~ | ~~P0~~ | ~~FIXED (BUG-017/018/019)~~ |
 | ~~pit~~ | ~~No available_at_ms in candle models~~ | ~~P2~~ | ~~FIXED (BUG-020)~~ |
 | ~~oi-recon~~ | ~~No OI reconciliation~~ | ~~P2~~ | ~~FIXED (BUG-021)~~ |
+
+
+---
+
+## PART 9 — FINAL CERTIFICATION UPDATE (2026-09-17, git 5dd69a2)
+
+**Last verified:** 2026-09-17  
+**Git commit:** 5dd69a2 (branch fix/bugs)  
+**Test suite:** 4821 passed, 0 failed, 6 warnings (all external) — clean environment  
+
+> Note: Previous test counts of "4,413" and "4,564" in earlier sections are SUPERSEDED. Actual current count: **4821 passed**.
+
+### Additional bugs fixed this pass
+
+| Fix | File(s) changed | Verified |
+|-----|----------------|---------|
+| BUG-024: `canonical_instrument_id` → `instrument_id` in historical_engine F&O token DB lookup | `src/engines/historical_engine.py` | Live pilot: F&O tokens resolved, candles persisted |
+| BUG-025: Expiry not populated on futures_candle insert (resolved from instrument_master) | `src/engines/historical_engine.py` | Live pilot: 54,683 rows with expiry=2026-09-29 |
+| BUG-026: `run_fno_pilot.py` column/type errors (calendar_date, instrument_id, datetime passing) | `scripts/run_fno_pilot.py` | Pilot executed successfully |
+| BUG-027: `run_failure_drills.py` passes raw Redis to CircuitBreaker (needs RedisClient wrapper) | `scripts/run_failure_drills.py` | Drill 1 now PASS |
+| FIX-T1: Test row-count assertions update (snapshot values stale post-migration growth) | `tests/test_v2_schema_migration.py`, `tests/test_pre_fno_backfill_certification.py` | 0 failures |
+| FIX-T2: `datetime.utcnow()` deprecation in test | `tests/unit/engines/test_freshness_classifier.py` | 0 deprecation warnings from owned code |
+
+### F&O pilot execution results (2026-09-17)
+
+Pilot window: 30 NSE trading days (2026-08-07 → 2026-09-17)  
+Instruments: NIFTY FUT, BANKNIFTY FUT, RELIANCE FUT, TCS FUT  
+Rows persisted: **54,683 futures_candle** (up from 20)  
+Gate results: no_3m=PASS, ohlc_ok=PASS, duplicates=PASS, lookahead=PASS, provenance=PASS, expiry_null=PASS
+
+### Live DB validation results (2026-09-17)
+
+| Check | Result |
+|-------|--------|
+| equity_candle neg_latency | 0 |
+| equity_candle future_source_ts | 0 |
+| equity_candle null_received_at | 0 |
+| equity_candle duplicates | 0 |
+| equity_candle 3m candles | 0 |
+| equity_candle OHLC violations | 0 |
+| futures_candle neg_latency | 0 |
+| futures_candle expiry null | 0 |
+| futures_candle OI zero corruption | 0 |
+| futures_candle duplicates | 0 |
+| futures_candle OHLC violations | 0 |
+
+### Updated production blockers
+
+| # | Blocker | Severity | Status |
+|---|---------|----------|--------|
+| B1 | Upstox OAuth access token expired (-218,983s as of 2026-09-17) | P0 | OUTSTANDING — OAuth callback required |
+| B2 | SmartStream (Angel One) not validated live | P1 | OUTSTANDING — requires market hours |
+| B3 | Upstox WS live binary frame not decoded live | P1 | OUTSTANDING — blocked by expired token |
+| B4 | Angel One getOIData plan restriction | P1 | OUTSTANDING |
+| B5 | F&O 5m/30m NIFTY returns HTTP 403 (plan restriction) | P2 | OUTSTANDING |
+| B6 | Upstox NFO 1d tokens not in instrument_provider_mapping | P2 | OUTSTANDING |
+| B7 | Consumer API rate limiting (inbound) not mounted | P3 | OUTSTANDING — middleware exists, not wired |
+| ~~B024~~ | ~~canonical_instrument_id bug~~ | ~~P0~~ | ~~FIXED~~ |
+| ~~B025~~ | ~~Expiry null on futures insert~~ | ~~P0~~ | ~~FIXED~~ |

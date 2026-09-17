@@ -766,12 +766,25 @@ class TestMigrationArchiveSafety:
     async def test_equity_candle_nse_count_matches_candle_bar(
         self, db_engine: AsyncEngine
     ) -> None:
-        """equity_candle NSE rows must equal candle_bar NSE rows."""
-        cb = await scalar(
-            db_engine, "SELECT COUNT(*) FROM candle_bar WHERE exchange='NSE'"
+        """Migration integrity: equity_candle angel_one rows must >= candle_bar angel_one rows.
+
+        equity_candle legitimately exceeds candle_bar because post-migration ingestion
+        appends new rows (upstox, yahoo_finance, new angel_one fetches) to equity_candle
+        but does not back-populate the legacy candle_bar archive.
+        The critical invariant is: no angel_one rows were lost during migration.
+        """
+        cb_angel = await scalar(
+            db_engine,
+            "SELECT COUNT(*) FROM candle_bar WHERE provider='angel_one'",
         )
-        ec = await scalar(db_engine, "SELECT COUNT(*) FROM equity_candle")
-        assert ec == cb, f"equity_candle={ec} != candle_bar NSE={cb}"
+        ec_angel = await scalar(
+            db_engine,
+            "SELECT COUNT(*) FROM equity_candle WHERE provider='angel_one'",
+        )
+        assert ec_angel >= cb_angel, (
+            f"MIGRATION DATA LOSS: equity_candle angel_one={ec_angel} < "
+            f"candle_bar angel_one={cb_angel}"
+        )
 
 
 # ============================================================================

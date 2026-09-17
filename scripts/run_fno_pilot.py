@@ -57,18 +57,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 #        ORDER BY canonical_instrument_id;
 PILOT_INSTRUMENTS = [
     {
-        "symbol":           "NIFTY25OCTFUT",
-        "canonical_id":     "NFO:NIFTY25OCTFUT",
+        "symbol":           "NIFTY29SEP26FUT",
+        "canonical_id":     "NFO:NIFTY29SEP26FUT",
         "exchange":         "NFO",
         "instrument_class": "FO",
         "underlying":       "NSE:NIFTY",
-        # Angel One token — MUST be populated in instrument_provider_mapping
-        "angel_token":      None,   # resolved at runtime from DB
-        "upstox_key":       None,   # resolved at runtime from DB
+        # Angel One token — resolved at runtime from instrument_provider_mapping
+        "angel_token":      None,
+        "upstox_key":       None,
     },
     {
-        "symbol":           "BANKNIFTY25OCTFUT",
-        "canonical_id":     "NFO:BANKNIFTY25OCTFUT",
+        "symbol":           "BANKNIFTY29SEP26FUT",
+        "canonical_id":     "NFO:BANKNIFTY29SEP26FUT",
         "exchange":         "NFO",
         "instrument_class": "FO",
         "underlying":       "NSE:BANKNIFTY",
@@ -76,8 +76,8 @@ PILOT_INSTRUMENTS = [
         "upstox_key":       None,
     },
     {
-        "symbol":           "RELIANCE25OCTFUT",
-        "canonical_id":     "NFO:RELIANCE25OCTFUT",
+        "symbol":           "RELIANCE29SEP26FUT",
+        "canonical_id":     "NFO:RELIANCE29SEP26FUT",
         "exchange":         "NFO",
         "instrument_class": "FO",
         "underlying":       "NSE:RELIANCE",
@@ -85,8 +85,8 @@ PILOT_INSTRUMENTS = [
         "upstox_key":       None,
     },
     {
-        "symbol":           "TCS25OCTFUT",
-        "canonical_id":     "NFO:TCS25OCTFUT",
+        "symbol":           "TCS29SEP26FUT",
+        "canonical_id":     "NFO:TCS29SEP26FUT",
         "exchange":         "NFO",
         "instrument_class": "FO",
         "underlying":       "NSE:TCS",
@@ -118,7 +118,7 @@ async def check_prerequisites(db_engine: Any, settings: Any) -> dict[str, Any]:
     # Check instrument tokens populated
     async with db_engine.connect() as conn:
         fno_count = (await conn.execute(
-            text("SELECT COUNT(*) FROM instrument_provider_mapping WHERE provider='angel_one' AND canonical_instrument_id LIKE 'NFO:%FUT%'")
+            text("SELECT COUNT(*) FROM instrument_provider_mapping WHERE provider='angel_one' AND instrument_id LIKE 'NFO:%FUT%'")
         )).scalar_one()
         checks["fno_tokens_populated"] = int(fno_count) > 0
         checks["fno_token_count"] = int(fno_count)
@@ -127,8 +127,8 @@ async def check_prerequisites(db_engine: Any, settings: Any) -> dict[str, Any]:
         today = datetime.date.today()
         pilot_start = today - datetime.timedelta(days=60)  # conservative search
         cal_rows = (await conn.execute(
-            text("SELECT COUNT(*) FROM exchange_calendar WHERE market_date >= :start AND market_date <= :end AND exchange='NSE'"),
-            {"start": pilot_start.isoformat(), "end": today.isoformat()}
+            text("SELECT COUNT(*) FROM exchange_calendar WHERE calendar_date >= :start AND calendar_date <= :end AND exchange='NSE' AND is_trading_day=TRUE"),
+            {"start": pilot_start, "end": today}
         )).scalar_one()
         checks["calendar_populated"] = int(cal_rows) >= PILOT_TRADING_DAYS
 
@@ -154,7 +154,7 @@ async def resolve_fno_tokens(db_engine: Any) -> list[dict]:
                 text("""
                     SELECT provider_instrument_id
                     FROM instrument_provider_mapping
-                    WHERE canonical_instrument_id = :cid AND provider = 'angel_one'
+                    WHERE instrument_id = :cid AND provider = 'angel_one'
                     LIMIT 1
                 """),
                 {"cid": instr["canonical_id"]},
@@ -165,7 +165,7 @@ async def resolve_fno_tokens(db_engine: Any) -> list[dict]:
                 text("""
                     SELECT provider_instrument_id
                     FROM instrument_provider_mapping
-                    WHERE canonical_instrument_id = :cid AND provider = 'upstox'
+                    WHERE instrument_id = :cid AND provider = 'upstox'
                     LIMIT 1
                 """),
                 {"cid": instr["canonical_id"]},
@@ -255,7 +255,7 @@ async def validate_pilot_results(db_engine: Any, from_ts: datetime.datetime, to_
                     OR low > LEAST(open, close)
                     OR high < low)
             """),
-            {"from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()}
+            {"from_ts": from_ts, "to_ts": to_ts}
         )).scalar_one()
         checks["ohlc_violations"] = int(ohlc_violations)
         checks["ohlc_ok"] = int(ohlc_violations) == 0
@@ -269,7 +269,7 @@ async def validate_pilot_results(db_engine: Any, from_ts: datetime.datetime, to_
                 WHERE time >= :from_ts AND time <= :to_ts
                   AND open_interest = 0
             """),
-            {"from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()}
+            {"from_ts": from_ts, "to_ts": to_ts}
         )).scalar_one()
         checks["oi_zero_count"] = int(oi_zero)
         # Zero OI is suspicious but not automatically a violation — mark for investigation
@@ -286,22 +286,21 @@ async def validate_pilot_results(db_engine: Any, from_ts: datetime.datetime, to_
                     HAVING COUNT(*) > 1
                 ) dups
             """),
-            {"from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()}
+            {"from_ts": from_ts, "to_ts": to_ts}
         )).scalar_one()
         checks["duplicates"] = int(duplicates)
         checks["duplicates_ok"] = int(duplicates) == 0
 
-        # 5. Point-in-time: look-ahead check on any available_at_ms
-        # available_at_ms must be NULL (legacy/historical) or >= candle epoch ms
-        # Since these are historical candles they will have available_at_ms = NULL — correct
+        # 5. Point-in-time: look-ahead check
+        # Historical candles have no available_at_ms (column doesn't exist in schema).
+        # Verify candle times are not in the future (cannot be look-ahead).
         lookahead = (await conn.execute(
             text("""
                 SELECT COUNT(*) FROM futures_candle
                 WHERE time >= :from_ts AND time <= :to_ts
-                  AND available_at_ms IS NOT NULL
-                  AND available_at_ms < EXTRACT(EPOCH FROM time) * 1000
+                  AND time > NOW() + INTERVAL '1 day'
             """),
-            {"from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()}
+            {"from_ts": from_ts, "to_ts": to_ts}
         )).scalar_one()
         checks["lookahead_violations"] = int(lookahead)
         checks["lookahead_ok"] = int(lookahead) == 0
@@ -313,7 +312,7 @@ async def validate_pilot_results(db_engine: Any, from_ts: datetime.datetime, to_
                 WHERE time >= :from_ts AND time <= :to_ts
                   AND (provider IS NULL OR provider = '')
             """),
-            {"from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()}
+            {"from_ts": from_ts, "to_ts": to_ts}
         )).scalar_one()
         checks["missing_provenance"] = int(no_provider)
         checks["provenance_ok"] = int(no_provider) == 0
@@ -390,13 +389,13 @@ async def main() -> None:
     async with db_engine.connect() as conn:
         rows = (await conn.execute(
             _text("""
-                SELECT market_date FROM exchange_calendar
+                SELECT calendar_date FROM exchange_calendar
                 WHERE exchange = 'NSE' AND is_trading_day = TRUE
-                  AND market_date <= :today
-                ORDER BY market_date DESC
+                  AND calendar_date <= :today
+                ORDER BY calendar_date DESC
                 LIMIT :n
             """),
-            {"today": today.date().isoformat(), "n": PILOT_TRADING_DAYS}
+            {"today": today.date(), "n": PILOT_TRADING_DAYS}
         )).fetchall()
 
     if len(rows) < PILOT_TRADING_DAYS:

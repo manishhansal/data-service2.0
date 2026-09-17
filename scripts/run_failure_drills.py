@@ -82,7 +82,9 @@ async def drill_angel_historical_unavailable() -> dict[str, Any]:
     redis_client = None
     try:
         import redis.asyncio as aioredis  # noqa: PLC0415
-        redis_client = await aioredis.from_url(settings.redis_url)
+        from src.cache.redis_client import RedisClient  # noqa: PLC0415
+        _raw_redis = await aioredis.from_url(settings.redis_url)
+        redis_client = RedisClient(client=_raw_redis)
     except Exception as exc:  # noqa: BLE001
         _info(f"Redis not available: {exc} — circuit breaker will use local state")
 
@@ -140,7 +142,7 @@ async def drill_angel_historical_unavailable() -> dict[str, Any]:
     result["status"] = "PASS" if result.get("fallback_verified") else "FAIL"
     await upstox.aclose()
     if redis_client:
-        await redis_client.aclose()
+        await redis_client._client.aclose()
     return result
 
 

@@ -1196,6 +1196,38 @@ class HistoricalEngine:
         # Segment label (EQ | IDX | ETF) used only by equity_candle.
         segment = "IDX" if instrument_class.upper() in ("IDX",) else "EQ"
 
+        # For F&O tables, resolve expiry and underlying_id from instrument_master.
+        # The Angel One API OHLCV response does not include expiry in each bar;
+        # it must be looked up once per instrument and injected into every row.
+        _fno_expiry: "datetime.date | None" = None
+        _fno_underlying: "str | None" = None
+        if target_table in ("futures_candle", "options_candle"):
+            _canonical_id = f"{exchange}:{symbol}"
+            try:
+                async with db_engine.connect() as _conn:
+                    _im_row = (await _conn.execute(
+                        text(
+                            "SELECT expiry, underlying FROM instrument_master "
+                            "WHERE instrument_id = :iid LIMIT 1"
+                        ),
+                        {"iid": _canonical_id},
+                    )).mappings().first()
+                    if _im_row:
+                        _fno_expiry = _im_row.get("expiry")
+                        _underlying = _im_row.get("underlying")
+                        if _underlying:
+                            # underlying in instrument_master is bare symbol (e.g. "NIFTY")
+                            # Qualify it with exchange prefix for canonical ID
+                            _fno_underlying = f"NSE:{_underlying}" if ":" not in _underlying else _underlying
+            except Exception as _exc:  # noqa: BLE001
+                logger.warning(
+                    "fno_expiry_lookup_failed",
+                    component="historical_engine",
+                    symbol=symbol,
+                    error=str(_exc),
+                )
+
+
         # Build the list of row dicts for the upsert.
         rows = []
         for c in candles:
@@ -1238,11 +1270,11 @@ class HistoricalEngine:
                     # equity_candle-specific
                     "segment": segment,
                     # futures/options-specific (None for equity)
-                    "expiry": c.get("expiry"),
+                    "expiry": c.get("expiry") or _fno_expiry,
                     "strike": c.get("strike"),
                     "option_type": c.get("optionType"),
                     # provenance fields — populated when available
-                    "underlying_id": c.get("underlyingId"),
+                    "underlying_id": c.get("underlyingId") or _fno_underlying,
                     "source_timestamp": _coerce_to_datetime(c.get("sourceTimestamp")) if c.get("sourceTimestamp") else None,
                 }
             )
@@ -1590,7 +1622,7 @@ class HistoricalEngine:
                                 _text("""
                                     SELECT provider_instrument_id
                                     FROM instrument_provider_mapping
-                                    WHERE canonical_instrument_id = :iid
+                                    WHERE instrument_id = :iid
                                       AND provider = 'angel_one'
                                     LIMIT 1
                                 """),
@@ -1713,7 +1745,7 @@ class HistoricalEngine:
                                 _text("""
                                     SELECT provider_instrument_id
                                     FROM instrument_provider_mapping
-                                    WHERE canonical_instrument_id = :iid
+                                    WHERE instrument_id = :iid
                                       AND provider = 'upstox'
                                     LIMIT 1
                                 """),
