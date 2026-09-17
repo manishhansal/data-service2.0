@@ -150,6 +150,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "instrument_master_loaded",
                 instrument_count=len(im_service._instruments),
             )
+            # ── Inject into MarketEngine so live quote token resolution works ──
+            if hasattr(app.state, "market_engine") and app.state.market_engine is not None:
+                app.state.market_engine.set_instrument_master(im_service)
+                await logger.ainfo("market_engine_instrument_master_injected")
+            # Inject DB engine for market_quote persistence
+            if hasattr(app.state, "market_engine") and app.state.market_engine is not None:
+                app.state.market_engine.set_db_engine(app.state.db_engine)
+                await logger.ainfo("market_engine_db_engine_injected")
         except Exception as exc:  # noqa: BLE001
             await logger.awarning(
                 "instrument_master_load_failed",
@@ -173,6 +181,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await logger.ainfo("historical_engine_ready")
     except Exception as exc:  # noqa: BLE001
         await logger.awarning("historical_engine_init_failed", error=str(exc))
+
+    # ── DualProviderEngine — inject db_engine if available ────────────────
+    if app.state.db_engine is not None:
+        try:
+            from src.engines.dual_provider_engine import DualProviderEngine  # noqa: PLC0415
+            dual_engine = DualProviderEngine(
+                angel_one_adapter=app.state.angel_one_adapter,
+                upstox_adapter=app.state.upstox_adapter,
+            )
+            dual_engine.set_db_engine(app.state.db_engine)
+            app.state.dual_provider_engine = dual_engine
+            await logger.ainfo("dual_provider_engine_ready")
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning("dual_provider_engine_init_failed", error=str(exc))
 
     await logger.ainfo("data_service_ready", version="2.0.0")
 
