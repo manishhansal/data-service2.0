@@ -83,6 +83,8 @@ services:
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+      UPSTOX_ACCESS_TOKEN: "${UPSTOX_ACCESS_TOKEN}"
+      UPSTOX_ANALYTICS_KEY: "${UPSTOX_ANALYTICS_KEY}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8200/v1/health/live"]
       interval: 10s
@@ -109,6 +111,10 @@ services:
     container_name: data-service-worker
     restart: unless-stopped
     command: ["python", "-m", "src.worker"]
+    # Worker runs no HTTP server — disable the image-level healthcheck that
+    # curls localhost:8200, which would always fail for a non-API process.
+    healthcheck:
+      disable: true
     depends_on:
       redis:
         condition: service_healthy
@@ -141,6 +147,8 @@ services:
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+      UPSTOX_ACCESS_TOKEN: "${UPSTOX_ACCESS_TOKEN}"
+      UPSTOX_ANALYTICS_KEY: "${UPSTOX_ANALYTICS_KEY}"
     networks:
       - data-service-net
     logging:
@@ -163,6 +171,9 @@ services:
     container_name: data-service-scheduler
     restart: unless-stopped
     command: ["python", "-m", "src.scheduler"]
+    # Scheduler runs no HTTP server — disable the image-level healthcheck.
+    healthcheck:
+      disable: true
     depends_on:
       redis:
         condition: service_healthy
@@ -188,6 +199,8 @@ services:
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+      UPSTOX_ACCESS_TOKEN: "${UPSTOX_ACCESS_TOKEN}"
+      UPSTOX_ANALYTICS_KEY: "${UPSTOX_ANALYTICS_KEY}"
     networks:
       - data-service-net
     logging:

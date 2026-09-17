@@ -1083,6 +1083,53 @@ class HistoricalEngine:
                 error=str(exc),
             )
 
+
+    @staticmethod
+    async def clear_checkpoint(
+        *,
+        symbol: str,
+        exchange: str,
+        interval: str,
+        redis_client: "AsyncRedis",
+    ) -> None:
+        """Delete the Redis checkpoint for a symbol/exchange/interval tuple.
+
+        Used by the ``force=True`` backfill path to ensure the full requested
+        date range is re-fetched, bypassing any checkpoint that would otherwise
+        skip historical dates earlier than the last persisted candle.
+
+        Safe to call when no checkpoint exists (Redis DEL on missing key is
+        a no-op).
+
+        Args:
+            symbol:       Instrument trading symbol.
+            exchange:     Exchange identifier.
+            interval:     Candle interval string.
+            redis_client: Async Redis client.
+        """
+        key = _CHECKPOINT_KEY_TEMPLATE.format(
+            symbol=symbol, exchange=exchange, interval=interval
+        )
+        try:
+            await redis_client.delete(key)
+            logger.info(
+                "backfill_checkpoint_cleared",
+                component="historical_engine",
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                key=key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "backfill_checkpoint_clear_error",
+                component="historical_engine",
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                error=str(exc),
+            )
+
     # ------------------------------------------------------------------ #
     # Bulk upsert
     # ------------------------------------------------------------------ #
@@ -1831,24 +1878,34 @@ class HistoricalEngine:
                 if _owns_upstox:
                     await upstox_adapter.aclose()
 
-                # Upstox returns candles as lists: [timestamp, o, h, l, c, vol, oi]
-                # Normalize to the dict format the engine expects.
+                # Upstox adapter now returns dicts with key "timestamp" (not "time").
+                # The canonical engine key is "time", so we normalise here.
+                # We also handle the legacy list/tuple format for any older code paths.
                 normalized = []
                 for raw in candles:
                     if isinstance(raw, (list, tuple)) and len(raw) >= 6:
                         normalized.append({
-                            "time":          raw[0],   # ISO-8601 string e.g. "2024-09-02T15:29:00+05:30"
-                            "open":          raw[1],
-                            "high":          raw[2],
-                            "low":           raw[3],
-                            "close":         raw[4],
-                            "volume":        raw[5],
-                            "oi":            raw[6] if len(raw) > 6 else None,
-                            "provider":      "upstox",
-                            "sourceType":    "BROKER_AUTHENTICATED",
+                            "time":       raw[0],   # ISO-8601 string e.g. "2024-09-02T15:29:00+05:30"
+                            "open":       raw[1],
+                            "high":       raw[2],
+                            "low":        raw[3],
+                            "close":      raw[4],
+                            "volume":     raw[5],
+                            "oi":         raw[6] if len(raw) > 6 else None,
+                            "provider":   "upstox",
+                            "sourceType": "BROKER_AUTHENTICATED",
                         })
                     elif isinstance(raw, dict):
-                        normalized.append(raw)  # already dict — pass through
+                        # BUG FIX: Upstox adapter returns "timestamp" key; engine expects "time".
+                        # Remap "timestamp" → "time" and "open_interest" → "oi" so
+                        # bulk_upsert_candles can parse the candle time correctly.
+                        if "timestamp" in raw and "time" not in raw:
+                            raw = dict(raw)  # shallow copy to avoid mutating the adapter output
+                            raw["time"] = raw.pop("timestamp")
+                        if "open_interest" in raw and "oi" not in raw:
+                            raw = dict(raw) if not isinstance(raw, dict) else raw
+                            raw["oi"] = raw.get("open_interest")
+                        normalized.append(raw)
                     else:
                         logger.warning(
                             "upstox_unexpected_candle_shape",

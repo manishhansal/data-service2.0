@@ -1056,6 +1056,12 @@ class BackfillRequest(_BaseModel):
     from_date: str
     to_date: Optional[str] = None
     instrument_class: str = "EQ"
+    # force=True bypasses the Redis checkpoint so historical windows
+    # blocked by a newer checkpoint are re-fetched in full.
+    force: bool = False
+    # TEST-ONLY: forces a specific provider ("angel_one", "upstox",
+    # "yahoo_finance").  Has no effect on production routing.
+    force_provider: Optional[str] = None
 
     @_field_validator("interval")
     @classmethod
@@ -1163,6 +1169,8 @@ async def trigger_backfill(
         "completedAt": None,
         "result": None,
         "error": None,
+        "force": body.force,
+        "forceProvider": body.force_provider,
     }
     _backfill_jobs[job_id] = job_record
 
@@ -1183,6 +1191,8 @@ async def trigger_backfill(
             to_dt=to_dt,
             db_engine=db_engine,
             redis_client=redis_client,
+            force=body.force,
+            force_provider=body.force_provider,
         )
     )
 
@@ -1269,6 +1279,8 @@ async def _run_backfill_job(
     to_dt: datetime,
     db_engine: Any,
     redis_client: Any,
+    force: bool = False,
+    force_provider: Optional[str] = None,
 ) -> None:
     """Execute the backfill job and update the job record on completion.
 
@@ -1289,6 +1301,25 @@ async def _run_backfill_job(
     job["startedAt"] = _utc_iso_now()
 
     try:
+        from src.core.schemas.provider import ProviderId  # noqa: PLC0415
+        _provider_override = None
+        if force_provider:
+            _fp = force_provider.lower().strip()
+            _provider_map = {
+                "angel_one": ProviderId.ANGEL_ONE,
+                "upstox":    ProviderId.UPSTOX,
+                "yahoo_finance": ProviderId.YAHOO_FINANCE,
+            }
+            _provider_override = _provider_map.get(_fp)
+        # When force=True, clear the checkpoint so the full range is
+        # re-fetched regardless of any existing checkpoint in Redis.
+        if force and redis_client is not None:
+            await hist_engine.clear_checkpoint(
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                redis_client=redis_client,
+            )
         result = await hist_engine.run_backfill(
             symbol=symbol,
             exchange=exchange,
@@ -1299,6 +1330,7 @@ async def _run_backfill_job(
             db_engine=db_engine,
             redis_client=redis_client,
             is_indian_market=True,
+            provider=_provider_override,
         )
         job["status"] = "COMPLETED"
         job["result"] = result
