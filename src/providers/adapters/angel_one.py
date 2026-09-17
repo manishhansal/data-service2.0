@@ -935,11 +935,31 @@ class AngelOneAdapter:
                 provider=_PROVIDER_NAME,
             )
 
-        data = body.get("data") or {}
-        data["provider"] = _PROVIDER_NAME
-        data["sourceType"] = _SOURCE_TYPE.value
-        data["fetchedAt"] = _utc_iso_now()
-        return data
+        data = body.get("data")
+        # Angel One PCR response may be a list of per-underlying records
+        # (observed live) or a single dict (older API versions / test fixtures).
+        # Normalise to a list so all consumers always receive the same shape.
+        if isinstance(data, list):
+            records = data
+        elif isinstance(data, dict):
+            records = [data] if data else []
+        else:
+            records = []
+
+        fetched_at = _utc_iso_now()
+        for record in records:
+            if isinstance(record, dict):
+                record["provider"] = _PROVIDER_NAME
+                record["sourceType"] = _SOURCE_TYPE.value
+                record["fetchedAt"] = fetched_at
+
+        logger.debug(
+            "angel_one_pcr_fetched",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+            record_count=len(records),
+        )
+        return {"data": records, "provider": _PROVIDER_NAME, "fetchedAt": fetched_at}
 
     async def fetch_oi_buildup(self) -> list[dict[str, Any]]:
         """Fetch OI buildup data (long/short buildup, covering, unwinding).

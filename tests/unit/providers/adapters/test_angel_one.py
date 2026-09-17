@@ -797,10 +797,16 @@ class TestFetchPCR:
         adapter = _make_adapter(mock_client)
         result = await adapter.fetch_pcr()
 
-        assert result["pcrOi"] == 0.82
+        # fetch_pcr now always returns {"data": list, "provider": ..., "fetchedAt": ...}
+        # When the API sends a dict, it is wrapped into a single-element list.
         assert result["provider"] == "angel_one"
-        assert result["sourceType"] == "BROKER_AUTHENTICATED"
         assert "fetchedAt" in result
+        records = result["data"]
+        assert isinstance(records, list)
+        assert len(records) == 1
+        assert records[0]["pcrOi"] == 0.82
+        assert records[0]["provider"] == "angel_one"
+        assert records[0]["sourceType"] == "BROKER_AUTHENTICATED"
 
     @pytest.mark.asyncio
     async def test_fetch_pcr_api_error_raises_data_error(self) -> None:
