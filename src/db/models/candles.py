@@ -138,6 +138,15 @@ class EquityCandle(Base):
     volume_unavailable: Mapped[bool] = mapped_column(
         Boolean(), nullable=False, server_default="FALSE"
     )
+    # ── Point-in-time ─────────────────────────────────────────────────────
+    available_at_ms: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment=(
+            "UTC epoch ms when this candle became observable (period closed). "
+            "NULL for legacy data. Contract: candle_time_ms <= available_at_ms. "
+            "Set by TickPersister for live candles; by backfill for historical."
+        ),
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
@@ -265,6 +274,11 @@ class FuturesCandle(Base):
     provenance_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    # ── Point-in-time ─────────────────────────────────────────────────────
+    available_at_ms: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="UTC epoch ms when this candle became observable. NULL for legacy data.",
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
@@ -386,6 +400,11 @@ class OptionsCandle(Base):
     )
     provenance_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True
+    )
+    # ── Point-in-time ─────────────────────────────────────────────────────
+    available_at_ms: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="UTC epoch ms when this candle became observable. NULL for legacy data.",
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")

@@ -686,6 +686,19 @@ async def get_stream_status(request: Request) -> JSONResponse:
             "validationFailures": engine_status.get("validationFailures", {}),
             "lastPublishedAt": engine_status.get("lastPublishedAt"),
             "brokerConnections": engine_status.get("brokerConnections", {}),
+            "tickPersister": (
+                request.app.state.tick_persister.get_stats()
+                if getattr(request.app.state, "tick_persister", None) is not None
+                else {"status": "not_initialised"}
+            ),
+            "angelOneStreamConnected": (
+                getattr(request.app.state, "angel_one_stream", None) is not None
+                and getattr(request.app.state.angel_one_stream, "is_connected", lambda: False)()
+            ),
+            "upstoxStreamConnected": (
+                getattr(request.app.state, "upstox_stream", None) is not None
+                and getattr(request.app.state.upstox_stream, "is_connected", lambda: False)()
+            ),
             "timestamp": _utc_iso_now(),
         },
     )

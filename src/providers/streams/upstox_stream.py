@@ -305,6 +305,8 @@ def _decode_feed_frame(raw_bytes: bytes) -> Optional[dict[str, Any]]:
     """Decode a raw Upstox V3 WebSocket frame.
 
     Tries generated _pb2 first, then falls back to generic decode.
+    The generic decode handles JSON bytes (test/mock environments) when
+    pb2 fails to parse the input.
 
     Args:
         raw_bytes: Raw binary frame from the WebSocket.
@@ -314,7 +316,10 @@ def _decode_feed_frame(raw_bytes: bytes) -> Optional[dict[str, Any]]:
     """
     pb2 = _try_import_pb2()
     if pb2 is not None:
-        return _decode_protobuf_with_pb2(raw_bytes, pb2)
+        result = _decode_protobuf_with_pb2(raw_bytes, pb2)
+        if result is not None:
+            return result
+        # pb2 failed — fall through to generic (handles JSON mock frames)
     return _decode_protobuf_generic(raw_bytes)
 
 

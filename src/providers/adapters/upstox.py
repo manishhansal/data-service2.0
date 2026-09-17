@@ -202,6 +202,7 @@ class UpstoxAdapter:
         redirect_uri: str = "https://localhost/callback",
         analytics_token: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
+        redis_client: Optional[Any] = None,
     ) -> None:
         self._api_key: str = api_key
         self._api_secret: str = api_secret
@@ -211,6 +212,20 @@ class UpstoxAdapter:
         self._access_token: Optional[str] = None
         self._analytics_token: Optional[str] = analytics_token
         self._token_lock: asyncio.Lock = asyncio.Lock()
+
+        # Redis client for multi-worker token sharing and distributed lock.
+        # When None, token state is local (single-worker only).
+        self._redis: Optional[Any] = redis_client
+
+        # Redis key constants for cross-worker token sharing
+        _REDIS_TOKEN_KEY = "mds:upstox:access_token"
+        _REDIS_ANALYTICS_KEY = "mds:upstox:analytics_token"
+        _REDIS_REFRESH_LOCK_KEY = "mds:upstox:refresh_lock"
+        _REDIS_TOKEN_EXPIRY_KEY = "mds:upstox:token_expiry_ts"
+        self._REDIS_TOKEN_KEY: str = _REDIS_TOKEN_KEY
+        self._REDIS_ANALYTICS_KEY: str = _REDIS_ANALYTICS_KEY
+        self._REDIS_REFRESH_LOCK_KEY: str = _REDIS_REFRESH_LOCK_KEY
+        self._REDIS_TOKEN_EXPIRY_KEY: str = _REDIS_TOKEN_EXPIRY_KEY
 
         # HTTP client
         self._owned_client: bool = http_client is None
@@ -231,6 +246,66 @@ class UpstoxAdapter:
         async with self._token_lock:
             self._access_token = token
         logger.debug("upstox_access_token_updated", component="upstox_adapter")  # type: ignore[attr-defined]
+
+    async def load_tokens_from_redis(self) -> None:
+        """Load access_token and analytics_token from Redis (multi-worker safe).
+
+        Called at worker startup so all workers share the same credential state.
+        Silently skips if Redis is unavailable or keys are absent.
+        """
+        if self._redis is None:
+            return
+        try:
+            access_raw = await self._redis.get(self._REDIS_TOKEN_KEY)
+            analytics_raw = await self._redis.get(self._REDIS_ANALYTICS_KEY)
+            async with self._token_lock:
+                if access_raw:
+                    self._access_token = access_raw.decode() if isinstance(access_raw, bytes) else access_raw
+                    logger.info("upstox_access_token_loaded_from_redis", component="upstox_adapter")  # type: ignore[attr-defined]
+                if analytics_raw:
+                    self._analytics_token = analytics_raw.decode() if isinstance(analytics_raw, bytes) else analytics_raw
+                    logger.info("upstox_analytics_token_loaded_from_redis", component="upstox_adapter")  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("upstox_redis_load_failed", component="upstox_adapter", error=str(exc))  # type: ignore[attr-defined]
+
+    async def _store_access_token_in_redis(self, token: str) -> None:
+        """Persist refreshed access token to Redis so all workers pick it up.
+
+        Sets a 23-hour TTL (Upstox access tokens expire after 24h; 1h safety margin).
+        """
+        if self._redis is None:
+            return
+        try:
+            # 23 hours = 82800 seconds (1-hour safety margin before expiry)
+            await self._redis.set(self._REDIS_TOKEN_KEY, token, ex=82800)
+            logger.info("upstox_access_token_stored_in_redis", component="upstox_adapter")  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("upstox_redis_store_failed", component="upstox_adapter", error=str(exc))  # type: ignore[attr-defined]
+
+    async def _acquire_refresh_lock(self, lock_ttl_sec: int = 30) -> bool:
+        """Try to acquire a distributed refresh lock in Redis.
+
+        Returns True if acquired, False if another worker holds the lock.
+        Uses SET NX EX (atomic) to prevent refresh storms across workers.
+        """
+        if self._redis is None:
+            return True  # No Redis → single-worker mode, always proceed
+        try:
+            result = await self._redis.set(
+                self._REDIS_REFRESH_LOCK_KEY, "1", nx=True, ex=lock_ttl_sec
+            )
+            return result is not None  # SET NX returns None if key already exists
+        except Exception:  # noqa: BLE001
+            return True  # Redis failure → allow local refresh
+
+    async def _release_refresh_lock(self) -> None:
+        """Release the distributed refresh lock."""
+        if self._redis is None:
+            return
+        try:
+            await self._redis.delete(self._REDIS_REFRESH_LOCK_KEY)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def set_analytics_token(self, token: str) -> None:
         """Store the long-lived Analytics Token (March 2026, 1-year validity).
@@ -267,7 +342,23 @@ class UpstoxAdapter:
             await self._do_token_refresh()
 
     async def _do_token_refresh(self) -> None:
-        """Internal token refresh — caller must hold _token_lock."""
+        """Internal token refresh — caller must hold _token_lock.
+
+        Uses a distributed Redis lock to prevent refresh storms when multiple
+        workers are running. If another worker is refreshing, wait briefly and
+        then load the new token from Redis rather than issuing a duplicate call.
+        """
+        # Try to acquire distributed lock — prevents parallel refresh storms
+        lock_acquired = await self._acquire_refresh_lock(lock_ttl_sec=30)
+        if not lock_acquired:
+            # Another worker is refreshing — wait for it and reload from Redis
+            logger.info("upstox_refresh_lock_held_by_peer", component="upstox_adapter")  # type: ignore[attr-defined]
+            import asyncio as _asyncio  # noqa: PLC0415
+            await _asyncio.sleep(3)
+            await self.load_tokens_from_redis()
+            if self._access_token or self._analytics_token:
+                return  # Peer refresh succeeded; our token is now valid
+            # Peer may have failed — fall through to our own attempt
         try:
             resp = await self._http.post(
                 UPSTOX_TOKEN_URL,
@@ -284,20 +375,26 @@ class UpstoxAdapter:
             )
         except httpx.HTTPError as exc:
             logger.warning("upstox_token_refresh_failed_network", component="upstox_adapter", error=type(exc).__name__)  # type: ignore[attr-defined]
+            await self._release_refresh_lock()
             raise ProviderAuthError("Upstox token refresh failed: network error") from exc
 
         if resp.status_code != 200:
             logger.warning("upstox_token_refresh_failed_http", component="upstox_adapter", status_code=resp.status_code)  # type: ignore[attr-defined]
+            await self._release_refresh_lock()
             raise ProviderAuthError(f"Upstox token refresh returned HTTP {resp.status_code}")
 
         try:
             payload = resp.json()
             new_token: str = payload["access_token"]
         except (KeyError, ValueError) as exc:
+            await self._release_refresh_lock()
             raise ProviderAuthError("Upstox token refresh response missing 'access_token'") from exc
 
         self._access_token = new_token
         logger.info("upstox_token_refreshed", component="upstox_adapter")  # type: ignore[attr-defined]
+        # Propagate to all other workers via Redis
+        await self._store_access_token_in_redis(new_token)
+        await self._release_refresh_lock()
 
     async def ensure_authenticated(self) -> None:
         """Verify a token is available; raise ProviderAuthError if not."""

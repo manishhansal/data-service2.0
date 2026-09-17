@@ -1570,28 +1570,55 @@ class HistoricalEngine:
                     return []
 
                 # Resolve numeric Angel One token.
-                # Priority: 1) instrument_master DB  2) well-known token map
+                # Priority:
+                #   1) instrument_provider_mapping table (covers F&O and EQ)
+                #   2) instrument_master table (EQ/IDX fallback)
+                #   3) well-known static token map
                 angel_token: str = symbol  # fallback: plain symbol (may fail)
                 base_symbol = symbol.split(":")[1] if ":" in symbol else symbol
                 instrument_id = f"{exchange}:{base_symbol}"
 
-                # Priority 1: Look up from instrument_master table via DB
+                # Priority 1: Look up from instrument_provider_mapping (correct for F&O)
+                # This table has provider_instrument_id = Angel One numeric token
+                # keyed by canonical instrument_id + provider = "angel_one"
                 if self._db_engine is not None:
                     from sqlalchemy import text as _text  # noqa: PLC0415
                     try:
                         async with self._db_engine.connect() as _conn:
+                            # First try instrument_provider_mapping — covers F&O contracts
                             _row = (await _conn.execute(
-                                _text("SELECT angel_token FROM instrument_master WHERE instrument_id=:iid OR (trading_symbol=:sym AND exchange=:exch) LIMIT 1"),
-                                {"iid": instrument_id, "sym": base_symbol, "exch": exchange},
+                                _text("""
+                                    SELECT provider_instrument_id
+                                    FROM instrument_provider_mapping
+                                    WHERE canonical_instrument_id = :iid
+                                      AND provider = 'angel_one'
+                                    LIMIT 1
+                                """),
+                                {"iid": instrument_id},
                             )).mappings().first()
-                        if _row and _row.get("angel_token"):
-                            angel_token = _row["angel_token"]
-                            logger.debug(
-                                "angel_one_token_resolved_from_db",
-                                component="historical_engine",
-                                symbol=symbol,
-                                token=angel_token,
-                            )
+                            if _row and _row.get("provider_instrument_id"):
+                                angel_token = _row["provider_instrument_id"]
+                                logger.debug(
+                                    "angel_one_token_resolved_from_mapping",
+                                    component="historical_engine",
+                                    symbol=symbol,
+                                    instrument_id=instrument_id,
+                                    token=angel_token,
+                                )
+                            else:
+                                # Fallback: instrument_master.angel_token (EQ/IDX)
+                                _row2 = (await _conn.execute(
+                                    _text("SELECT angel_token FROM instrument_master WHERE instrument_id=:iid OR (trading_symbol=:sym AND exchange=:exch) LIMIT 1"),
+                                    {"iid": instrument_id, "sym": base_symbol, "exch": exchange},
+                                )).mappings().first()
+                                if _row2 and _row2.get("angel_token"):
+                                    angel_token = _row2["angel_token"]
+                                    logger.debug(
+                                        "angel_one_token_resolved_from_master",
+                                        component="historical_engine",
+                                        symbol=symbol,
+                                        token=angel_token,
+                                    )
                     except Exception as _exc:  # noqa: BLE001
                         logger.debug(
                             "angel_one_token_db_lookup_failed",
@@ -1614,7 +1641,7 @@ class HistoricalEngine:
                         "angel_one_token_unknown",
                         component="historical_engine",
                         symbol=symbol,
-                        hint="Token not found in instrument_master or _ANGEL_ONE_KNOWN_TOKENS",
+                        hint="Token not in instrument_provider_mapping, instrument_master, or _ANGEL_ONE_KNOWN_TOKENS. Run /v1/admin/instruments/sync to populate.",
                     )
 
                 # Reuse a pre-authenticated shared adapter when available
@@ -1665,19 +1692,59 @@ class HistoricalEngine:
                 from src.providers.adapters.upstox import UpstoxAdapter  # noqa: PLC0415
                 from src.core.settings import get_settings  # noqa: PLC0415
                 settings = get_settings()
-                if not settings.upstox_access_token:
+                if not (settings.upstox_access_token or settings.upstox_analytics_key):
                     logger.debug("upstox_not_configured", component="historical_engine")
                     return []
 
-                # Resolve Upstox instrument key (NSE_EQ|ISIN or NSE_INDEX|Name)
+                # Resolve Upstox instrument key.
+                # Priority:
+                #   1) instrument_provider_mapping (covers F&O with correct ISIN/key)
+                #   2) _UPSTOX_INSTRUMENT_KEYS static map (EQ/IDX)
                 base_symbol = symbol.split(":")[1] if ":" in symbol else symbol
-                upstox_key = _UPSTOX_INSTRUMENT_KEYS.get(base_symbol)
+                instrument_id_key = f"{exchange}:{base_symbol}"
+                upstox_key: Optional[str] = None
+
+                # Priority 1: DB lookup from instrument_provider_mapping
+                if self._db_engine is not None:
+                    from sqlalchemy import text as _text  # noqa: PLC0415
+                    try:
+                        async with self._db_engine.connect() as _conn:
+                            _row = (await _conn.execute(
+                                _text("""
+                                    SELECT provider_instrument_id
+                                    FROM instrument_provider_mapping
+                                    WHERE canonical_instrument_id = :iid
+                                      AND provider = 'upstox'
+                                    LIMIT 1
+                                """),
+                                {"iid": instrument_id_key},
+                            )).mappings().first()
+                            if _row and _row.get("provider_instrument_id"):
+                                upstox_key = _row["provider_instrument_id"]
+                                logger.debug(
+                                    "upstox_key_resolved_from_mapping",
+                                    component="historical_engine",
+                                    symbol=symbol,
+                                    upstox_key=upstox_key,
+                                )
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.debug(
+                            "upstox_key_db_lookup_failed",
+                            component="historical_engine",
+                            symbol=symbol,
+                            error=str(_exc),
+                        )
+
+                # Priority 2: static map
+                if upstox_key is None:
+                    upstox_key = _UPSTOX_INSTRUMENT_KEYS.get(base_symbol)
+
                 if upstox_key is None:
                     logger.warning(
                         "upstox_instrument_key_unknown",
                         component="historical_engine",
                         symbol=symbol,
-                        hint="Add ISIN-based key to _UPSTOX_INSTRUMENT_KEYS",
+                        hint="Add ISIN-based key to instrument_provider_mapping or _UPSTOX_INSTRUMENT_KEYS",
                     )
                     return []
 
@@ -1704,7 +1771,13 @@ class HistoricalEngine:
                         api_secret=settings.upstox_api_secret or "",
                         redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
                     )
-                    await upstox_adapter.set_access_token(settings.upstox_access_token)
+                    # Set whichever token is available:
+                    # analytics_key works for all historical/quote calls
+                    # access_token needed for intraday and WS calls
+                    if settings.upstox_analytics_key:
+                        await upstox_adapter.set_analytics_token(settings.upstox_analytics_key)
+                    if settings.upstox_access_token:
+                        await upstox_adapter.set_access_token(settings.upstox_access_token)
                     _owns_upstox = True
 
                 logger.debug(

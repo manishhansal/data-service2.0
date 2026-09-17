@@ -428,6 +428,146 @@ class ReconciliationEngine:
 
         return result
 
+    # ------------------------------------------------------------------
+    # OI reconciliation (NEW — Phase I)
+    # ------------------------------------------------------------------
+
+    def reconcile_oi(
+        self,
+        *,
+        provider_a: str,
+        oi_a: Optional[int],
+        oi_a_status: str,        # "LIVE", "HISTORICAL", "BLOCKED_BY_PROVIDER_PLAN", "UNAVAILABLE"
+        provider_b: str,
+        oi_b: Optional[int],
+        oi_b_status: str,
+        instrument_id: str,
+        interval: str,
+        candle_time_ms: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Reconcile open interest from two providers.
+
+        OI handling rules (non-negotiable):
+        - NULL OI from a provider means the provider did NOT supply OI.
+          It MUST NOT be treated as zero.
+        - Zero OI is valid only when the provider explicitly returns 0.
+        - BLOCKED_BY_PROVIDER_PLAN must be surfaced; never substituted with 0.
+        - Cross-provider comparison requires aligned candle timestamps.
+
+        Args:
+            provider_a:      First provider name (e.g. "angel_one").
+            oi_a:            OI value from provider A. None = not supplied.
+            oi_a_status:     Why provider A's OI has this value.
+            provider_b:      Second provider name (e.g. "upstox").
+            oi_b:            OI value from provider B. None = not supplied.
+            oi_b_status:     Why provider B's OI has this value.
+            instrument_id:   Canonical instrument ID.
+            interval:        Candle interval string.
+            candle_time_ms:  Candle open timestamp (UTC epoch ms) for alignment.
+
+        Returns:
+            OI reconciliation dict with keys:
+                canonical_oi, canonical_provider, oi_status,
+                oi_provider_a, oi_provider_b, oi_deviation_pct,
+                oi_a_status, oi_b_status, notes
+        """
+        result: dict[str, Any] = {
+            "instrument_id":   instrument_id,
+            "interval":        interval,
+            "candle_time_ms":  candle_time_ms,
+            "provider_a":      provider_a,
+            "oi_provider_a":   oi_a,
+            "oi_a_status":     oi_a_status,
+            "provider_b":      provider_b,
+            "oi_provider_b":   oi_b,
+            "oi_b_status":     oi_b_status,
+            "canonical_oi":    None,
+            "canonical_provider": None,
+            "oi_deviation_pct": None,
+            "oi_status":       "UNKNOWN",
+            "notes":           [],
+        }
+
+        # Both blocked/unavailable
+        if oi_a is None and oi_b is None:
+            notes = []
+            if "BLOCKED" in oi_a_status.upper():
+                notes.append(f"{provider_a}: {oi_a_status}")
+            if "BLOCKED" in oi_b_status.upper():
+                notes.append(f"{provider_b}: {oi_b_status}")
+            result["oi_status"] = "NULL_UNAVAILABLE"
+            result["notes"] = notes
+            logger.debug(
+                "oi_reconciliation_both_null",
+                component="reconciliation_engine",
+                instrument_id=instrument_id,
+                oi_a_status=oi_a_status,
+                oi_b_status=oi_b_status,
+            )
+            return result
+
+        # Only one provider has OI
+        if oi_a is None:
+            result["canonical_oi"] = oi_b
+            result["canonical_provider"] = provider_b
+            result["oi_status"] = "SINGLE_PROVIDER"
+            result["notes"] = [f"{provider_a} OI unavailable: {oi_a_status}"]
+            return result
+
+        if oi_b is None:
+            result["canonical_oi"] = oi_a
+            result["canonical_provider"] = provider_a
+            result["oi_status"] = "SINGLE_PROVIDER"
+            result["notes"] = [f"{provider_b} OI unavailable: {oi_b_status}"]
+            return result
+
+        # Both have OI — compare
+        if oi_a == 0 and oi_b == 0:
+            result["canonical_oi"] = 0
+            result["canonical_provider"] = provider_a
+            result["oi_deviation_pct"] = 0.0
+            result["oi_status"] = "CONFIRMED"
+            return result
+
+        # Calculate percentage deviation
+        denom = max(abs(oi_a), abs(oi_b))
+        if denom == 0:
+            oi_dev_pct = 0.0
+        else:
+            oi_dev_pct = round(abs(oi_a - oi_b) / denom * 100.0, 4)
+
+        result["oi_deviation_pct"] = oi_dev_pct
+
+        if oi_dev_pct <= 0.5:
+            result["oi_status"] = "CONFIRMED"
+        elif oi_dev_pct <= 2.0:
+            result["oi_status"] = "MINOR_DISCREPANCY"
+        else:
+            result["oi_status"] = "MAJOR_DISCREPANCY"
+            result["notes"] = [
+                f"OI deviation {oi_dev_pct:.2f}% exceeds 2% threshold. "
+                f"{provider_a}={oi_a} vs {provider_b}={oi_b}"
+            ]
+
+        # Canonical selection: prefer Angel One (dedicated OI endpoint)
+        # unless Angel One was BLOCKED
+        if "BLOCKED" not in oi_a_status.upper():
+            result["canonical_oi"] = oi_a
+            result["canonical_provider"] = provider_a
+        else:
+            result["canonical_oi"] = oi_b
+            result["canonical_provider"] = provider_b
+
+        logger.debug(
+            "oi_reconciliation_result",
+            component="reconciliation_engine",
+            instrument_id=instrument_id,
+            oi_status=result["oi_status"],
+            oi_dev_pct=oi_dev_pct,
+        )
+
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Helpers
