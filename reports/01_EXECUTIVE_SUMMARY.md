@@ -6,6 +6,10 @@
 **Auditor:** Kiro AI — adversarial independent audit  
 **Repos audited:** data-service2.0 · alpha-forge
 
+> **Current status as of 2026-09-17:** See `FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`.  
+> Test count: **4,413** (was 4,485 at this audit). DB: **5,460,561** equity candles.  
+> Key changes since this report: market_quote/option_greeks/option_chain persistence fixed; Upstox V3 migration complete.
+
 ---
 
 ## Overall Verdict

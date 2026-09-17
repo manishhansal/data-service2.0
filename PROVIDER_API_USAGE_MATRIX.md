@@ -114,10 +114,11 @@ Classification:
 |-----------|---------|-------------|----------------|--------|
 | GET /v3/market-quote/ltp | V3 | LTP + ltq + volume + prevClose | USED | Lightweight live quote |
 | GET /v3/market-quote/ohlc | V3 | OHLC with prev+live candles | USED | OHLC quote |
-| GET /v2/market-quote/quotes | V2 | Full quote (max 500) | USED | Complete market data (no V3 equivalent) |
+| GET /v3/market-quote/quotes | **V3** | Full quote (max 500) + CAS fields | USED | **Migrated from V2 April 2025 — V3 adds CAS indicative price fields** |
 | GET /v3/market-quote/option-greek | V3 | Option Greeks (max 50) | USED | IV + Greeks for F&O |
 | GET /v2/market-quote/ohlc | V2 | OHLC (deprecated) | DEPRECATED | Replaced by V3 |
 | GET /v2/market-quote/ltp | V2 | LTP (deprecated) | DEPRECATED | Replaced by V3 |
+| ~~GET /v2/market-quote/quotes~~ | ~~V2~~ | ~~Full quote (deprecated)~~ | ~~DEPRECATED~~ | Migrated to V3 April 2025 |
 
 ### Option Chain
 
@@ -133,7 +134,15 @@ Classification:
 | GET /v2/market/status/{exchange} | V2 | Exchange trading status | USED | Real-time session status |
 | GET /v2/market/holidays | V2 | Market holidays | USED | Calendar population |
 | GET /v2/market/timings/{date} | V2 | Session timings | USED | Pre/post market boundaries |
-| Market Information APIs (May 2026) | V2 | FII/DII/OI/PCR/MaxPain | NOT_IMPLEMENTED | Launched May 2026; medium priority |
+| GET /v2/market/oi | V2 | OI distribution per underlying | **IMPLEMENTED** | `fetch_oi_data()` — May 2026 |
+| GET /v2/market/pcr | V2 | Put-Call Ratio time-series | **IMPLEMENTED** | `fetch_pcr_data()` — May 2026 |
+| GET /v2/market/max-pain | V2 | Max Pain analysis | **IMPLEMENTED** | `fetch_max_pain()` — May 2026 |
+| GET /v2/market/change-oi | V2 | Change in OI | **IMPLEMENTED** | `fetch_change_oi()` — May 2026 |
+| GET /v2/market/fii | V2 | FII activity data | **IMPLEMENTED** | `fetch_fii_data()` — May 2026 |
+| GET /v2/market/dii | V2 | DII activity data | **IMPLEMENTED** | `fetch_dii_data()` — May 2026 |
+| GET /v2/market/smartlist/futures | V2 | Futures smartlist | **IMPLEMENTED** | `fetch_smartlist_futures()` — May 2026 |
+| GET /v2/market/smartlist/options | V2 | Options smartlist | **IMPLEMENTED** | `fetch_smartlist_options()` — May 2026 |
+| GET /v2/market/smartlist/mtf | V2 | MTF eligible stocks | **IMPLEMENTED** | `fetch_smartlist_mtf()` — May 2026 |
 
 ### Instruments
 
@@ -185,7 +194,7 @@ The following Upstox APIs are not implemented:
 
 | API | Classification | Explanation |
 |----|----------------|-------------|
-| Market Info APIs (May 2026) | NOT_IMPLEMENTED | Launched May 2026; will be added in next iteration |
+| ~~Market Info APIs (May 2026)~~ | **IMPLEMENTED** | All 6 APIs implemented 2026-09-17 (`fetch_oi_data`, `fetch_pcr_data`, etc.) |
 | cas_eligible in instruments | NOT_IMPLEMENTED | CAS eligibility useful but not blocking |
 | Instrument Search (V2) | NOT_IMPLEMENTED | Static BOD instrument files used instead |
 | Orders, Holdings, Portfolio | NOT_NEEDED | Not a market data service function |
@@ -193,4 +202,4 @@ The following Upstox APIs are not implemented:
 
 ---
 
-*Zero unexplained unused relevant APIs.*
+*Last updated: 2026-09-17. Zero unexplained unused relevant APIs.*

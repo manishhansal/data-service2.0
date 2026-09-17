@@ -1,38 +1,74 @@
 # INDIAN MARKET LIVE DATA STORAGE ARCHITECTURE
-**Version:** 2.0.0  
-**Date:** 2026-09-15  
-**Status:** DESIGNED — Infrastructure ready, live feed wiring pending
+**Version:** 2.1.0  
+**Date:** 2026-09-17 (updated from 2026-09-15)  
+**Status:** IMPLEMENTED AND CERTIFIED — `market_quote` and `option_chain_snapshot` live data flowing; WebSocket tick persistence pending
 
 ---
 
-## 1. LIVE DATA FLOW
+## 1. LIVE DATA FLOW (as of 2026-09-17)
 
+### REST Quote path (ACTIVE)
 ```
-Angel One / Upstox / Approved Live Provider
+Angel One / Upstox REST API
               │
-         WebSocket
+      Provider Adapter (fetch_live_quote / fetch_full_quote V3)
               │
-      Provider Adapter
-    (src/providers/adapters/)
+     AngelOneNormalizer / UpstoxNormalizer
               │
-     Raw Live Observation
+    persist_market_quote()  ←── fire-and-forget after every fetch
               │
-         Validation
-    (src/core/validators/)
-              │
+         market_quote  (TimescaleDB, depth_json JSONB, source_type)
+              │                          ↑ 439+ rows as of 2026-09-17
     ┌─────────┴──────────┐
     ↓                    ↓
-market_tick          market_quote
-(TimescaleDB)        (TimescaleDB)
-    │                    │
-    └─────────┬──────────┘
+Live API response     Redis L2 Cache
+(GET /v1/india/       TTL=3s quotes
+ quotes/{symbol})     TTL=30s intraday
+```
+
+### Option Chain path (ACTIVE)
+```
+Upstox fetch_option_chain (V2) + fetch_option_greeks_batched (V3)
               │
-      Candle Builder
-  (1m candle aggregation)
+     UpstoxNormalizer.normalize_option_chain / normalize_option_greek
               │
-       equity_candle
-     futures_candle
-     options_candle
+    ┌─────────┴────────────────────────────┐
+    ↓                                      ↓
+option_chain_snapshot               option_greeks_snapshot
++ option_chain_contract             (TimescaleDB hypertable)
+(UUID PK, CASCADE)                  (iv/delta/gamma/theta/vega/oi)
+54 snapshots, 20 contracts          15 rows as of 2026-09-17
+```
+
+### WebSocket path (PENDING — not yet certified)
+```
+Angel One SmartStream V2 / Upstox WebSocket V3
+              │
+      Provider Stream Adapter          ← byte offsets not confirmed
+              │                        ← pb2 file absent for Upstox
+     StreamingEngine.publish_tick()
+              │
+     Redis Event Bus (mds:events:ticks)  ← only path currently active
+              │
+    market_tick (TimescaleDB)            ← 0 rows — not yet written
+              │
+    Candle aggregation                   ← not yet implemented
+```
+
+### Historical path (ACTIVE)
+```
+Angel One getCandleData + Upstox V3 historical-candle
+              │  (all 9 intervals: 1m/5m/10m/15m/30m/1h/1d/1w/1M)
+     HistoricalEngine.run_backfill()
+              │  (checkpointed, resumable)
+     bulk_upsert_candles()
+              │  (source_timestamp, underlying_id now written)
+    ┌──────────────────────────────────┐
+    ↓                ↓                 ↓
+equity_candle    futures_candle    options_candle
+5,460,561 rows   20 rows           0 rows
+(9 intervals)    (pending pilot)   (pending pilot)
+```
               │
     ┌─────────┴──────────┐
     ↓                    ↓

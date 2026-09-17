@@ -10,13 +10,18 @@
 **Standalone, production-grade Market Data Platform.**  
 Single market-data authority for AlphaForge. Every market data request flows through this service — no consumer calls an external provider directly.
 
+**Version 2.1.0** · 4,413 unit tests · 5,460,561 equity candles · market_quote + option_greeks + option_chain persistence active
+
 | Document | Purpose |
 |---|---|
 | [`docs/DATA_SERVICE_GUIDE.md`](docs/DATA_SERVICE_GUIDE.md) | Full technical deep-dive: all components, configuration, troubleshooting |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Complete API reference — 61 endpoints across 14 functional groups |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, module map, data flow diagrams |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, module map, data flow diagrams (v2.1.0) |
 | [`ALPHAFORGE_DATA_REQUIREMENTS.md`](ALPHAFORGE_DATA_REQUIREMENTS.md) | AlphaForge integration contract and null semantics |
-| [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) | Authoritative production-readiness status |
+| [`FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) | **Current** runtime certification — live evidence 2026-09-17 |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history — v2.1.0 pipeline fixes + Upstox V3 migration |
+| [`reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) | Detailed runtime certification with all bug fixes |
+| [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) | P0 blocker resolution record (2026-09-15) |
 | [`.env.example`](.env.example) | Annotated reference for every environment variable |
 
 ---

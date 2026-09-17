@@ -174,3 +174,26 @@ candle_bar               5,425,725 rows  (read-only archive; 5.4M NSE + 6 CRYPTO
 **Original effective date:** 2026-09-14  
 **v2 schema update:** 2026-09-15  
 **Next review:** After Upstox live quotes wired + F&O backfill complete + weekday market-hours WebSocket test
+
+
+---
+
+## UPDATE — 2026-09-17 (v2.1.0 pipeline fixes + Upstox V3 migration)
+
+**Test count:** 4,413 passing (0 failures)  
+**DB state:** 5,460,561 equity_candle + 439 market_quote + 15 option_greeks_snapshot + 54 option_chain_snapshot + 20 option_chain_contract
+
+### What changed since this report
+
+| Item | Previous | Current |
+|------|----------|---------|
+| market_quote | NEVER written | ✅ Written after every live quote |
+| option_greeks_snapshot | NEVER written | ✅ Written after every Greeks API call |
+| option_chain persistence | NEVER written | ✅ Written after every chain fetch |
+| Upstox full_quote | V2 endpoint | ✅ Migrated to V3 |
+| Upstox interval support | 5 (basic plan) | ✅ All 9 intervals (V3) |
+| MarketEngine HTTP 400 | Bug — symbol as token | ✅ Fixed — numeric token lookup |
+| Upstox normalizer missing fields | totalBuyQty/weekHigh52 dropped | ✅ Fixed |
+| Per-candle provenance in API | Not in response | ✅ provider+sourceType per candle |
+
+*For complete current certification: see `FINAL_PROVIDER_RUNTIME_CERTIFICATION.md` (2026-09-17).*

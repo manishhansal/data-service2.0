@@ -2,9 +2,23 @@
 ## data-service2.0 — AlphaForge Market Data Platform
 
 **Certification Date:** 2026-09-16  
+**Updated:** 2026-09-17 (post live-testing + pipeline gap fixes)  
 **Certified by:** Kiro automated audit + implementation  
-**Test Suite:** 4397 unit tests — ALL PASSING, 0 failures  
+**Test Suite:** 4,413 unit tests — ALL PASSING, 0 failures (updated 2026-09-17)  
 **Scope:** Angel One SmartAPI + Upstox V2/V3 integration in data-service2.0
+
+### Key changes since 2026-09-16
+
+- **Upstox V3 full market quote migration:** `fetch_full_quote` migrated from `/v2/market-quote/quotes` to `/v3/market-quote/quotes` (April 2025 Upstox launch)
+- **Upstox interval restriction lifted:** `_UPSTOX_V2_SUPPORTED_INTERVALS` (5 intervals) replaced with `_UPSTOX_V3_SUPPORTED_INTERVALS` (all 9 intervals)
+- **6 new Upstox Market Information APIs added:** `fetch_oi_data`, `fetch_pcr_data`, `fetch_max_pain`, `fetch_change_oi`, `fetch_fii_data`, `fetch_dii_data`
+- **3 new Upstox Smartlist APIs added:** `fetch_smartlist_futures`, `fetch_smartlist_options`, `fetch_smartlist_mtf`
+- **market_quote persistence FIXED:** All live quotes now persisted to DB with depth_json + source_type
+- **option_greeks_snapshot persistence FIXED:** Greeks now persisted after every API call
+- **option_chain_snapshot + contract persistence FIXED:** Chain snapshots + per-strike rows now persisted
+- **Upstox normalizer gaps FIXED:** `totalBuyQty`, `totalSellQty`, `weekHigh52`, `weekLow52`, `avgTradedPrice` now captured
+- **MarketEngine token bug FIXED:** Symbol→numeric Angel One token resolution via InstrumentMasterService
+- **PCR schema bug FIXED:** `fetch_pcr()` handles list response correctly
 
 ---
 

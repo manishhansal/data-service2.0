@@ -177,3 +177,19 @@
 ---
 
 *Report generated: 2026-09-16. Live verification requires credentials configured in .env.local.*
+
+
+---
+
+## UPDATE — 2026-09-17
+
+| Change | Detail |
+|--------|--------|
+| BUG-001 FIXED | MarketEngine now resolves numeric Angel One token via InstrumentMasterService — zero HTTP 400s |
+| BUG-002 FIXED | `fetch_pcr()` handles list response correctly |
+| market_quote persistence ADDED | Live quotes (ltp, OHLC, depth, weekHigh52/Low, circuits) now persisted to `market_quote` |
+| Candle upsert source_timestamp ADDED | Written from provider response where available |
+| API response per-candle provider/sourceType ADDED | `provider` and `sourceType` now included in every candle in `GET /v1/india/historical` |
+| Live verification | Auth re-confirmed; RELIANCE ltp=1240.6 in market_quote; HDFCBANK ltp=714.1 in market_quote; option_greeks 328 contracts confirmed |
+
+*Unit tests: 4,413 passing (0 failures) as of 2026-09-17.*

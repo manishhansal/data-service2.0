@@ -1,7 +1,7 @@
 # DATA-SERVICE 2.0 — Architecture Reference
 
-> **Version:** 2.0.0 · **Port:** 8200 · **Language:** Python 3.11+  
-> Last updated: 2026-09-15
+> **Version:** 2.1.0 · **Port:** 8200 · **Language:** Python 3.11+  
+> Last updated: 2026-09-17 (pipeline gap fixes + Upstox V3 migration)
 
 ---
 
@@ -359,8 +359,9 @@ Orchestrates all Indian live market data:
 
 Manages OHLCV backfill across all Indian intervals:
 - Chunks requests by `maxChunkDays` per provider (avoids API date-range limits)
-- Primary: Upstox V3 (1m: 7-day chunks; 5m/15m: 30-day chunks; 1d: 365-day chunks)
+- Primary: Upstox V3 (all 9 intervals now supported — 5m/10m/15m/1h restriction lifted 2026-09-17)
 - Secondary: Angel One SmartAPI (1m: 30-day; 5m/15m: 90-day)
+- Source timestamp, underlying_id, and source_type now written on every candle row (fixed 2026-09-17)
 - Cross-provider reconciliation reports CONFIRMED / MINOR_DIVERGENCE / MAJOR_DIVERGENCE
 
 ### GapRecovery (`src/engines/gap_recovery.py`)
@@ -533,16 +534,16 @@ All three enforce: no `3m` interval (CHECK constraint), OHLC validity (high≥op
 
 | Table | Purpose |
 |---|---|
-| `market_tick` | Live WebSocket ticks — LTP, bid/ask, quantities, sequence number |
-| `market_quote` | Polled live quote snapshots — full OHLCV, circuit limits, 52-week range |
+| `market_tick` | Live WebSocket ticks — LTP, bid/ask, quantities, sequence number (pending WebSocket certification) |
+| `market_quote` | Polled live quote snapshots — full OHLCV, circuit limits, 52-week range, depth_json (JSONB), source_type. **Written after every live quote fetch (fixed 2026-09-17).** |
 
 #### Layer 4 — Option Chain
 
 | Table | Purpose |
 |---|---|
-| `option_chain_snapshot` | Point-in-time chain header (UUID PK) — spot price, ATM strike, PCR, max pain, ATM IV |
-| `option_chain_contract` | Per-strike rows (FK → snapshot, CASCADE DELETE) — full Greeks nullable by design |
-| `option_greeks_snapshot` | Greeks time-series (TimescaleDB hypertable, 1-day chunks) |
+| `option_chain_snapshot` | Point-in-time chain header (UUID PK) — spot price, ATM strike, PCR, max pain, ATM IV. **Written after every chain fetch (fixed 2026-09-17).** |
+| `option_chain_contract` | Per-strike rows (FK → snapshot, CASCADE DELETE) — full Greeks nullable by design. **Written after every chain fetch (fixed 2026-09-17).** |
+| `option_greeks_snapshot` | Greeks time-series (TimescaleDB hypertable) — iv, delta, gamma, theta, vega, **oi, volume, ltp, prev_close, ltq** (columns added 2026-09-17). **Written after every REST Greeks API call (fixed 2026-09-17).** |
 
 #### Layer 5 — Calendar + Sessions
 
@@ -568,12 +569,15 @@ All three enforce: no `3m` interval (CHECK constraint), OHLC validity (high≥op
 
 | Table | Rows |
 |---|---|
-| `equity_candle` | 5,425,719 (72 TimescaleDB chunks) |
+| `equity_candle` | **5,460,561** (9 intervals: 1m/5m/10m/15m/30m/1h/1d/1w/1M) |
 | `futures_candle` | 20 (live F&O data — NIFTY + RELIANCE Sep FUT) |
+| `market_quote` | 3 (real live quotes: RELIANCE ltp=1240.6, HDFCBANK ltp=714.1 with depth) |
+| `option_greeks_snapshot` | 10 (NIFTY Sep29 options: iv/delta/gamma/theta/vega/oi) |
+| `option_chain_snapshot` | 53 (NIFTY/BANKNIFTY/FINNIFTY snapshots) |
+| `option_chain_contract` | 10 (per-strike CE/PE rows with Greeks) |
 | `instrument_provider_mapping` | 68,915 (Angel One + Upstox tokens) |
 | `exchange_calendar` | 3,654 (NSE/EQ + NFO/FO, 2024–2028) |
 | `fno_universe_membership` | 238 active |
-| `candle_bar` | 5,425,725 (archive — 5.4M NSE + 6 CRYPTO_PENDING) |
 
 ### Migration management
 
@@ -760,7 +764,7 @@ All adapters implement `src/providers/adapters/base.py:ProviderAdapter`.
 | Adapter | Module | Auth | Data types | Notes |
 |---|---|---|---|---|
 | **Angel One SmartAPI** | `angel_one.py` | TOTP + JWT (MPIN); Redis-shared JWT across workers | Live quotes, option chain, OHLCV historical, broker analytics (PCR, OI, gainers) | 3 req/s limit; 1m historical max 30 days per chunk; 5m/15m max 90 days. Redis key `mds:angel_one:jwt:{client_id}` (TTL 6 h) prevents TOTP conflicts across 4 Uvicorn workers |
-| **Upstox V3** | `upstox.py` | OAuth2 access token (pre-obtained) | OHLCV historical, live quotes, index intraday | 1m: 7-day chunks; 5m/15m: 30-day chunks; 1d: 365-day chunks; Protobuf WS |
+| **Upstox V3** | `upstox.py` | OAuth2 access token (pre-obtained) or Analytics Token (1-year validity) | OHLCV historical V3 (all 9 intervals), LTP V3, OHLC V3, Full Quote **V3** (migrated Apr 2025), Option Greeks V3, Option Chain V2, Market Info V2 (PCR/OI/MaxPain/FII/DII), Smartlist V2 | 1m: 28-day; 5m/15m: 90-day; 1d: 365-day; Protobuf WS (pb2 pending) |
 | **NSE Scrapling** | `scrapling_nse.py` | None (public) | Index live quotes via `/api/allIndices` (139+ indices, no JS cookies required); market status | NSE `quote-equity` returns HTTP 403 (Akamai WAF requires JS/behavioral challenge); equity quotes unsupported as of Sep 2026. Use `fetch_all_indices()` for all index symbols (NIFTY, BANKNIFTY, FINNIFTY, etc.) |
 | **Jugaad-data** | `jugaad_data.py` | None (public) | NSE historical OHLCV (EOD) | Open-source fallback for Indian historical data |
 | **OpenChart** | `openchart.py` | None (public) | NSE intraday OHLCV | Open-source fallback |

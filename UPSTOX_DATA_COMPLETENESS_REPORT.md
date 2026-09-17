@@ -258,3 +258,21 @@
 ---
 
 *Report generated: 2026-09-16. Live verification requires credentials configured in .env.local.*
+
+
+---
+
+## UPDATE — 2026-09-17
+
+| Change | Detail |
+|--------|--------|
+| `fetch_full_quote` → V3 | Migrated to `/v3/market-quote/quotes`; V3 adds CAS indicative price fields |
+| Interval restriction lifted | All 9 intervals now supported on V3 (5m/10m/15m/1h previously blocked by stale V2 guard) |
+| `normalize_full_quote` fields added | `totalBuyQty`, `totalSellQty`, `weekHigh52`, `weekLow52`, `avgTradedPrice` now captured |
+| 6 new Market Information APIs | `fetch_oi_data`, `fetch_pcr_data`, `fetch_max_pain`, `fetch_change_oi`, `fetch_fii_data`, `fetch_dii_data` |
+| 3 new Smartlist APIs | `fetch_smartlist_futures`, `fetch_smartlist_options`, `fetch_smartlist_mtf` |
+| option_chain persistence | FIXED — chain snapshots + per-strike contracts now written to DB |
+| option_greeks persistence | FIXED — Greeks written to `option_greeks_snapshot` after each API call |
+| Live verification | LTP V3 (RELIANCE=1243.9, HDFCBANK=716.35, NIFTY=23240.7), Full Quote V3, Option Chain (128/150/123 rows), Historical V3 all intervals — all confirmed 2026-09-17 |
+
+*Unit tests: 4,413 passing (0 failures) as of 2026-09-17.*

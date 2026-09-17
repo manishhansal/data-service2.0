@@ -1,7 +1,7 @@
 # DATA-SERVICE 2.0 — API Reference
-**Version:** 2.0.0  
+**Version:** 2.1.0  
 **Base URL:** `http://localhost:8200` (local dev) · `https://<host>` (production)  
-**Updated:** 2026-09-15
+**Updated:** 2026-09-17 (Upstox V3 migration; historical candle response now includes `provider` and `sourceType` per candle)
 
 ---
 
@@ -278,7 +278,7 @@ Historical OHLCV candles. Queries the DB first; triggers a live backfill if DB i
 **Response `200`**
 ```json
 {
-  "candles":  [ { "time": 1704067200, "open": 1470.0, "high": 1485.5, "low": 1462.0, "close": 1478.3, "volume": 4215000, "oi": null, "volumeUnavailable": false } ],
+  "candles":  [ { "time": 1704067200, "open": 1470.0, "high": 1485.5, "low": 1462.0, "close": 1478.3, "volume": 4215000, "oi": null, "volumeUnavailable": false, "provider": "upstox", "sourceType": "BROKER_AUTHENTICATED" } ],
   "count":    1,
   "truncated": false,
   "provider": "angel_one",

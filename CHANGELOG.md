@@ -4,7 +4,50 @@ All notable changes to DATA-SERVICE 2.0 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 > **Current status:** CONDITIONALLY_READY for production  
-> See [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) for the authoritative production-readiness assessment.
+> See [`reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) for the authoritative runtime certification.
+
+---
+
+## [2.1.0] — 2026-09-17 (data pipeline gap fixes + Upstox V3 migration)
+
+### Fixed (critical data pipeline gaps)
+
+- **market_quote persistence:** `persist_market_quote()` added to `market_engine.py` — fire-and-forget async upsert writes every live quote to `market_quote` with `depth_json` (JSONB), `source_type`, `change`, `change_pct`, `avg_traded_price`. DB migration adds these columns and the unique constraint needed for upsert.
+- **option_greeks_snapshot persistence:** `_persist_option_greeks()` added to `api/india.py` — writes Greeks (iv, delta, gamma, theta, vega, oi, volume, ltp) to DB after every REST Greeks API call.
+- **option_chain_snapshot + option_chain_contract persistence:** `_persist_option_chain()` added to `dual_provider_engine.py` — writes chain snapshots and per-strike CE/PE contract rows including Greeks and OI.
+- **bulk_upsert_candles:** `source_timestamp` and `underlying_id` now written to all three candle tables. SQL uses `COALESCE(EXCLUDED, existing)` to preserve existing timestamps on conflict.
+- **Historical API per-candle response:** `provider` and `sourceType` now included in every candle returned by `GET /v1/india/historical`. SQL updated to SELECT `source_type`.
+- **Upstox normalizer gaps:** `normalize_full_quote` now captures `totalBuyQty`, `totalSellQty`, `weekHigh52`, `weekLow52`, `avgTradedPrice` from V2/V3 response.
+- **MarketEngine token bug (BUG-001):** `_fetch_live_quote_stub` now resolves numeric Angel One token via `InstrumentMasterService.resolve_provider_tokens()`. Zero HTTP 400s confirmed post-fix.
+- **PCR analytics schema (BUG-002):** `fetch_pcr()` now handles Angel One list response — returns `{"data": [list], "provider": ..., "fetchedAt": ...}`.
+
+### Changed (Upstox V3 migration)
+
+- **`fetch_full_quote` migrated to V3:** `GET /v3/market-quote/quotes` replaces deprecated `GET /v2/market-quote/quotes` (Upstox V3 launched April 2025; V3 adds CAS fields).
+- **Upstox interval restriction lifted:** `_UPSTOX_V2_SUPPORTED_INTERVALS` (5 intervals: 1m/30m/1d/1w/1M) replaced with `_UPSTOX_V3_SUPPORTED_INTERVALS` (all 9 canonical intervals). V3 has no plan-based interval restrictions.
+- **Historical engine routing:** IDX and EQ routing now recognises `upstox_analytics_key` as a valid credential (not just `upstox_access_token`).
+
+### Added (new Upstox APIs)
+
+- **Market Information APIs (launched May 2026):** `fetch_oi_data`, `fetch_pcr_data`, `fetch_max_pain`, `fetch_change_oi`, `fetch_fii_data`, `fetch_dii_data` — all calling V2 market endpoints.
+- **Smartlist APIs (launched May 2026):** `fetch_smartlist_futures`, `fetch_smartlist_options`, `fetch_smartlist_mtf`.
+- **DB migration `20260917_000000`:** Adds `depth_json` (JSONB), `source_type`, `change`, `change_pct`, `avg_traded_price` to `market_quote`; adds `oi`, `volume`, `ltp`, `prev_close`, `ltq`, `instrument_key` to `option_greeks_snapshot`; adds unique constraint `mq_instrument_exchange_ts_provider_uq` to enable market_quote upserts.
+- **`set_db_engine()` injected into `MarketEngine` and `DualProviderEngine`** from server lifespan for persistence.
+- **`DualProviderEngine` pre-constructed in `server.py`** with db_engine injection for option chain persistence.
+
+### DB state after 2.1.0
+
+| Table | Rows | New rows since 2.0.0 |
+|-------|------|---------------------|
+| equity_candle | 5,460,561 | +34,842 (intraday backfill) |
+| market_quote | 3 | +3 (new live data) |
+| option_greeks_snapshot | 10 | +10 (new live data) |
+| option_chain_snapshot | 53 | +1 (real data added) |
+| option_chain_contract | 10 | +10 (real data added) |
+
+### Tests
+
+4,413 unit tests passing (0 failures). +16 tests added for new Upstox V3 endpoints and market_quote/greeks persistence.
 
 ---
 
