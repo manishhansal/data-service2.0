@@ -38,10 +38,12 @@ HOOK_SOURCE  := $(PROJECT_DIR)/.git/hooks/post-push
 DEPLOY_LOG   := $(PROJECT_DIR)/.git/deploy.log
 WEBHOOK_COMPOSE := $(PROJECT_DIR)/docker/webhook/docker-compose.webhook.yml
 
-# ── Env file resolution (production → local → .env) ──────────────────────────
-ENV_FILE     := $(or \
-  $(if $(wildcard $(PROJECT_DIR)/.env.production),.env.production), \
+# ── Env file resolution ───────────────────────────────────────────────────────
+# Override at the command line:  make up ENV_FILE=.env.staging
+# Auto-detection order: .env.local (dev) → .env.production (server) → .env
+ENV_FILE     ?= $(or \
   $(if $(wildcard $(PROJECT_DIR)/.env.local),.env.local), \
+  $(if $(wildcard $(PROJECT_DIR)/.env.production),.env.production), \
   $(if $(wildcard $(PROJECT_DIR)/.env),.env))
 
 # ── Docker Compose base command ───────────────────────────────────────────────
