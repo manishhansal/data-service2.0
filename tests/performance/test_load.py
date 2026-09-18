@@ -59,8 +59,16 @@ os.environ.setdefault("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
 os.environ.setdefault("ENVIRONMENT", "development")
 # Set a test API key so that the ConsumerAuthDependency allows test requests.
 # DS2-RCA-016 fix: auth is now enforced — performance tests must supply a key.
-os.environ.setdefault("CONSUMER_API_KEYS", "perf-test-key-1")
+# Use direct assignment (not setdefault) to ensure perf-test-key-1 is always
+# present even when .env.local pre-populates CONSUMER_API_KEYS with other keys.
+_existing_keys = os.environ.get("CONSUMER_API_KEYS", "")
+if "perf-test-key-1" not in _existing_keys:
+    os.environ["CONSUMER_API_KEYS"] = (
+        (_existing_keys + ",perf-test-key-1") if _existing_keys else "perf-test-key-1"
+    )
 os.environ.setdefault("JWT_SECRET", "perf-test-jwt-secret-must-be-32chars!")
+# Raise consumer rate limit very high so performance tests don't hit 429
+os.environ["CONSUMER_RATE_LIMIT"] = "100000"
 
 from src.server import create_app  # noqa: E402  (must come after env setup)
 

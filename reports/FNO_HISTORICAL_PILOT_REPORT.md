@@ -83,6 +83,7 @@ Token resolution: 4/4 instruments from `instrument_provider_mapping` (deduped �
 | candles past instrument expiry | PASS | 0 violations |
 | neg_volume | PASS | 0 |
 | future_received_at | PASS | 0 |
+| fc_candle_not_after_expiry DB constraint | PASS | Constraint added 2026-09-18; post-expiry inserts blocked |
 
 > Pilot gate script output 2026-09-18: `PILOT STATUS: PASS`
 
@@ -150,6 +151,7 @@ futures_ohlc_high_lt_low:       0
 | OHLC violations = 0 | PASS |
 | OI NULL→0 corruption = 0 | PASS |
 | survivorship = N/A | NOT_EXECUTED (no expired contract in pilot window — all current expiry 2026-09-29) |
+| survivorship DB constraint | PASS (fc_candle_not_after_expiry added 2026-09-18; post-expiry inserts blocked at DB level) |
 | look-ahead = PASS | PASS |
 
 **Full 1-year F&O backfill: AUTHORIZED for intervals/instruments where pilot PASSED.**  

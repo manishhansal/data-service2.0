@@ -216,6 +216,12 @@ class Settings(BaseSettings):
     # access token — does not expire on a per-session basis.
     upstox_analytics_key: Optional[str] = None
 
+    # ── Consumer inbound rate limiting ────────────────────────────────────
+    # Controls RateLimitMiddleware (src/middleware/rate_limiter.py).
+    # Set CONSUMER_RATE_LIMIT / CONSUMER_RATE_WINDOW_SEC in .env to tune.
+    consumer_rate_limit: int = 100      # requests per window
+    consumer_rate_window_sec: int = 60  # sliding window duration (seconds)
+
     # ── Crypto provider base URLs ─────────────────────────────────────────
     # Override these to point at testnet/sandbox environments or a proxy.
     # Defaults are the official public endpoints — no credentials required

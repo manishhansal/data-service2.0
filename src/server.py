@@ -346,6 +346,16 @@ def create_app() -> FastAPI:
 
     app.add_middleware(CredentialStripperMiddleware)
 
+    # ── Consumer inbound rate limiting (Req 13.3) ─────────────────────────
+    # Soft-limits inbound API traffic per consumer IP.
+    # Exempt: /v1/health/live, /metrics (no Redis dependency for health checks).
+    # Configurable via CONSUMER_RATE_LIMIT and CONSUMER_RATE_WINDOW_SEC env vars.
+    from src.middleware.rate_limiter import RateLimitMiddleware  # noqa: PLC0415
+
+    _rl_limit = settings.consumer_rate_limit
+    _rl_window = settings.consumer_rate_window_sec
+    app.add_middleware(RateLimitMiddleware, limit=_rl_limit, window_sec=_rl_window)
+
     # ── Routers (registered here; implemented in later tasks) ────────────
     _register_routers(app)
 
@@ -362,6 +372,7 @@ def _register_routers(app: FastAPI) -> None:
     _try_include(app, "src.api.health", prefix="", tags=["Health"])
     _try_include(app, "src.api.metrics", prefix="", tags=["Metrics"])
     _try_include(app, "src.auth.consumer_auth", prefix="/v1", tags=["Auth"])
+    _try_include(app, "src.api.upstox_auth", prefix="/v1", tags=["Auth"])
     # ── AlphaForge ScraplingProvider compatibility routes (unauthenticated) ──
     # These /scraping/* endpoints translate AlphaForge's ScraplingProvider
     # calls into data-service2.0 backend logic.  They do NOT require API key

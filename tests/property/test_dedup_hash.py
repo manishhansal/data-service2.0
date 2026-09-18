@@ -74,6 +74,10 @@ class TestDedupHashStability:
         """Different LTP values produce different hashes (collision resistance)."""
         if ltp1 == ltp2:
             return  # identical input — skip; not a collision
+        # Also skip if the :.10g serialisation produces identical strings
+        # (e.g. 0.01 vs 0.010000000000000002 — same price within float precision)
+        if f"{ltp1:.10g}" == f"{ltp2:.10g}":
+            return  # same serialised value — hash collision is expected and correct
         h1 = compute_dedup_hash(instrument_id, event_time_ms, source, ltp1, volume)
         h2 = compute_dedup_hash(instrument_id, event_time_ms, source, ltp2, volume)
         assert h1 != h2

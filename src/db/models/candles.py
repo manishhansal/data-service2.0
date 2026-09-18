@@ -300,6 +300,10 @@ class FuturesCandle(Base):
             name="fc_oi_non_negative",
         ),
         CheckConstraint("contract_type = 'FUT'", name="fc_contract_type_fut"),
+        CheckConstraint(
+            "CAST(time AS date) <= expiry",
+            name="fc_candle_not_after_expiry",
+        ),
         CheckConstraint(_DATA_ORIGIN_CHECK, name="fc_data_origin_valid"),
         CheckConstraint(_QUALITY_STATUS_CHECK, name="fc_quality_status_valid"),
         Index(

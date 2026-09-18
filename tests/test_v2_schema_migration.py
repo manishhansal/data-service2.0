@@ -268,7 +268,7 @@ class TestSchemaExistence:
 
     async def test_alembic_revision(self, db_engine: AsyncEngine) -> None:
         rev = await scalar(db_engine, "SELECT version_num FROM alembic_version")
-        assert rev == "20260917_100000", f"Expected revision 20260917_100000 (HEAD), got {rev!r}"
+        assert rev == "20260918_000000", f"Expected revision 20260918_000000 (HEAD), got {rev!r}"
 
     async def test_total_table_count(self, db_engine: AsyncEngine) -> None:
         """24 tables total (23 user + alembic_version)."""

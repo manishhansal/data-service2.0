@@ -2,7 +2,7 @@
 ## data-service2.0
 
 **Last verified:** 2026-09-18
-**Git commit:** 56156ec (fix/bugs; prev: 5dd69a2)
+**Git commit:** 330269c (fix/bugs)
 **Test suite:** 4821 passed, 0 failed
 **Runtime environment:** Python 3.14.6, Docker containers running
 
@@ -21,6 +21,7 @@
 | Live WebSocket connection | NOT VERIFIED | Blocked: Upstox OAuth token expired |
 | 1000 real binary messages decoded | NOT VERIFIED | Blocked: OAuth token expired |
 | LTP vs REST reconciliation | NOT VERIFIED | Blocked: OAuth token expired |
+| OAuth refresh route | PASS | `/v1/auth/upstox/login` + `/v1/auth/upstox/callback` live 2026-09-18; code exchange reaches Upstox token endpoint (returns 401 for invalid code — route correctly wired) |
 
 **Upstox WebSocket:**  
 Status: NOT VERIFIED  
