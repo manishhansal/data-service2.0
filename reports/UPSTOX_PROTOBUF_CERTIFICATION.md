@@ -1,9 +1,9 @@
 # UPSTOX PROTOBUF CERTIFICATION
 ## data-service2.0
 
-**Last verified:** 2026-09-17  
-**Git commit:** 5dd69a2 (fix/bugs)  
-**Test suite:** 4821 passed, 0 failed (clean env)  
+**Last verified:** 2026-09-18
+**Git commit:** 56156ec (fix/bugs; prev: 5dd69a2)
+**Test suite:** 4821 passed, 0 failed
 **Runtime environment:** Python 3.14.6, Docker containers running
 
 ---
@@ -49,6 +49,8 @@ Blocker: Upstox OAuth access token expired 2026-09-14 (delta=-218,983s as of 202
 **`_try_import_pb2()` returns:** `<module 'src.providers.streams.upstox_market_data_feeder_pb2'>`  
 **`FeedResponse()` constructs:** YES  
 **`ParseFromString(empty)` succeeds:** YES  
+
+> Re-verified 2026-09-18 (git 56156ec): same result. pb2 is present in git and importable at runtime.
 
 ---
 

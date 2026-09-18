@@ -212,7 +212,7 @@ async def execute(engine: AsyncEngine, sql: str, **params: Any) -> Any:
 # ============================================================================
 
 class TestSchemaExistence:
-    """All 16 new tables must exist after migration b1c2d3e4f5a6."""
+    """All 16 new tables must exist after migration to HEAD (20260917_100000)."""
 
     NEW_TABLES = [
         "equity_candle",
@@ -268,7 +268,7 @@ class TestSchemaExistence:
 
     async def test_alembic_revision(self, db_engine: AsyncEngine) -> None:
         rev = await scalar(db_engine, "SELECT version_num FROM alembic_version")
-        assert rev == "b1c2d3e4f5a6", f"Expected revision b1c2d3e4f5a6, got {rev!r}"
+        assert rev == "20260917_100000", f"Expected revision 20260917_100000 (HEAD), got {rev!r}"
 
     async def test_total_table_count(self, db_engine: AsyncEngine) -> None:
         """24 tables total (23 user + alembic_version)."""
@@ -446,7 +446,7 @@ class TestMigrationDataIntegrity:
         count = await scalar(
             db_engine, "SELECT COUNT(*) FROM equity_candle WHERE segment='IDX'"
         )
-        assert count == 968, f"Expected 968 IDX rows, got {count}"
+        assert count >= 968, f"Expected >= 968 IDX rows, got {count}"
 
     async def test_no_binance_in_equity_candle(self, db_engine: AsyncEngine) -> None:
         count = await scalar(

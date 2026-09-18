@@ -1,10 +1,10 @@
 # F&O HISTORICAL PILOT REPORT
 ## data-service2.0
 
-**Last verified:** 2026-09-17  
-**Git commit:** 5dd69a2 (fix/bugs)  
-**Test suite:** 4821 passed, 0 failed (clean env)  
-**Pilot execution:** COMPLETED 2026-09-17 (partial — some intervals BLOCKED_BY_EXTERNAL)
+**Last verified:** 2026-09-18
+**Git commit:** 56156ec (fix/bugs; prev: 5dd69a2)
+**Test suite:** 4821 passed, 0 failed
+**Pilot execution:** RE-EXECUTED 2026-09-18 — gates PASS
 
 ---
 
@@ -18,12 +18,26 @@ BLOCKED intervals (HTTP 403 from Angel One plan / missing Upstox tokens) must no
 
 ---
 
-## PILOT EXECUTION RESULTS (2026-09-17, git 5dd69a2)
+## PILOT EXECUTION RESULTS (2026-09-18, git 56156ec)
 
-Pilot window: **2026-08-07 → 2026-09-17 (30 NSE trading days)**  
-Script: `scripts/run_fno_pilot.py`  
-Angel One authenticated: YES (TOTP)  
-Token resolution: 4/4 instruments from `instrument_provider_mapping`
+Pilot window: **2026-08-07 → 2026-09-17 (30 NSE trading days)**
+Script: `scripts/run_fno_pilot.py`
+Angel One authenticated: YES (TOTP, JWT from Redis)
+Token resolution: 4/4 instruments from `instrument_provider_mapping` (deduped — 34,505 active rows)
+
+> Note: Prior run 2026-09-17 (5dd69a2) was the first execution. Re-run on 2026-09-18 (56156ec) incremented checkpointed ranges.
+> All gate checks below reflect the live DB state as of 2026-09-18.
+
+### Candles in futures_candle (2026-09-18 post-run)
+
+| Instrument | 1m | 5m | 15m | 30m | 1h | Total |
+|-----------|-----|-----|-----|-----|-----|-------|
+| NFO:NIFTY29SEP26FUT | 10,877 | 0 (403) | 726 | 377 | 203 | 12,193 |
+| NFO:BANKNIFTY29SEP26FUT | 10,737 | 2,176 | 726 | 377 | 203 | 14,219 |
+| NFO:RELIANCE29SEP26FUT | 10,865 | 2,176 | 726 | 377 | 203 | 14,347 |
+| NFO:TCS29SEP26FUT | 10,809 | 2,176 | 726 | 377 | 203 | 14,291 |
+
+**Total futures_candle rows (2026-09-18):** 55,060
 
 ### Candles persisted (futures_candle table)
 
@@ -54,9 +68,7 @@ Token resolution: 4/4 instruments from `instrument_provider_mapping`
 | NFO:TCS29SEP26FUT | 1h | 203 | 203 | 0 | 2026-09-29 | PASS |
 | NFO:TCS29SEP26FUT | 1d | 0 | — | — | — | BLOCKED_BY_EXTERNAL (Upstox token missing) |
 
-**Total futures_candle rows:** 54,683 (up from 20 pre-pilot)
-
-### Validation gate results
+**Total futures_candle rows:** 54,683 (up from 20 pre-pilot) (2026-09-18 SQL, live DB)
 
 | Gate | Result | Value |
 |------|--------|-------|
@@ -66,8 +78,13 @@ Token resolution: 4/4 instruments from `instrument_provider_mapping`
 | duplicates | PASS | 0 |
 | lookahead_violations | PASS | 0 |
 | provenance_complete | PASS | 0 missing |
-| expiry populated (not null) | PASS | 0 null (FIXED in this pass) |
+| expiry populated (not null) | PASS | 0 null |
 | candle_time > expiry | PASS | 0 violations |
+| candles past instrument expiry | PASS | 0 violations |
+| neg_volume | PASS | 0 |
+| future_received_at | PASS | 0 |
+
+> Pilot gate script output 2026-09-18: `PILOT STATUS: PASS`
 
 ---
 

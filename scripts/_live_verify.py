@@ -31,7 +31,7 @@ async def run():
 
     print("=" * 60)
     print("LIVE PROVIDER VERIFICATION")
-    print(f"Time (UTC): {datetime.datetime.utcnow().isoformat()}Z")
+    print(f"Time (UTC): {datetime.datetime.now(datetime.timezone.utc).isoformat()}")
     print("=" * 60)
 
     print("\n=== CREDENTIAL STATUS ===")

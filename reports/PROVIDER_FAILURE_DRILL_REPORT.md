@@ -1,10 +1,9 @@
 # PROVIDER FAILURE DRILL REPORT
 ## data-service2.0
 
-**Last verified:** 2026-09-17  
-**Git commit:** 5dd69a2 (fix/bugs)  
-**Test suite:** 4821 passed, 0 failed (clean env)  
-**Evidence basis:** Live drill execution (`scripts/run_failure_drills.py`) + unit tests
+**Last verified:** 2026-09-18
+**Git commit:** 56156ec (fix/bugs; prev: 5dd69a2)
+**Test suite:** 4821 passed, 0 failed; 169 failover/circuit/drill tests pass
 
 ---
 

@@ -360,11 +360,13 @@ typecheck: ## Run mypy type checker
 
 test: ## Run the test suite (unit tests only, no integration)
 	@printf "$(CYAN)[test]$(NC) Running pytest (unit tests)...\n"
-	pytest -m "not integration and not performance" tests/
+	@if [ -f "$(ENV_FILE)" ]; then set -a && . ./$(ENV_FILE) && set +a; fi && \
+		pytest -m "not integration and not performance" tests/
 
 test-all: ## Run all tests including integration (requires live Redis + PostgreSQL)
 	@printf "$(CYAN)[test]$(NC) Running full test suite (integration tests require running stack)...\n"
-	pytest tests/
+	@if [ -f "$(ENV_FILE)" ]; then set -a && . ./$(ENV_FILE) && set +a; fi && \
+		pytest tests/
 
 
 # =============================================================================
