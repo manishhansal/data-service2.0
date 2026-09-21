@@ -89,7 +89,7 @@ NC    := \033[0m
         fix-equity-partials \
         seed-fo-universe seed-fo-universe-dry \
         fix-all-gaps \
-        data-report \
+        data-report worker-logs catchup-status \
         clean prune
 
 # =============================================================================
@@ -607,6 +607,22 @@ data-report: ## Print ML data status — row counts and date ranges per table
 		     MIN(date), MAX(date), COUNT(DISTINCT underlying_id) \
 		   FROM continuous_futures \
 		 ) t ORDER BY tbl, interval_str;"
+
+worker-logs: ## Tail the worker container logs (shows OHLCV catch-up activity)
+	$(DC) logs -f --tail=100 worker
+
+catchup-status: ## Show OHLCV catch-up status — last checkpoint per interval
+	@printf "$(CYAN)[catchup]$(NC) OHLCV Catch-up Status (latest candle per interval)\n"
+	@printf "$(CYAN)─────────────────────────────────────────────────────────$(NC)\n"
+	$(DC) exec -T postgres psql -U $${POSTGRES_USER:-mds_user} -d $${POSTGRES_DB:-mds} \
+		--no-psqlrc -P pager=off -c \
+		"SELECT interval_str, \
+		   COUNT(DISTINCT instrument_id) AS instruments, \
+		   MAX(time)::date AS latest_candle, \
+		   NOW()::date - MAX(time)::date AS days_behind \
+		 FROM equity_candle \
+		 GROUP BY interval_str \
+		 ORDER BY interval_str;"
 
 
 # =============================================================================

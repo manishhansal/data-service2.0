@@ -57,6 +57,15 @@ services:
       # ── Gap recovery ─────────────────────────────────────────────────────
       GAP_RECOVERY_MAX_ATTEMPTS: "${GAP_RECOVERY_MAX_ATTEMPTS:-5}"
 
+      # ── OHLCV catch-up worker ─────────────────────────────────────────────
+      CATCHUP_ENABLED: "${CATCHUP_ENABLED:-true}"
+      CATCHUP_CONCURRENCY: "${CATCHUP_CONCURRENCY:-2}"
+      CATCHUP_CHUNK_DELAY_S: "${CATCHUP_CHUNK_DELAY_S:-0.3}"
+      CATCHUP_EOD_HOUR_IST: "${CATCHUP_EOD_HOUR_IST:-17}"
+      CATCHUP_INTRADAY_INTERVAL_H: "${CATCHUP_INTRADAY_INTERVAL_H:-4}"
+      CATCHUP_INTERVALS_EOD: "${CATCHUP_INTERVALS_EOD:-1d,1w,1M}"
+      CATCHUP_INTERVALS_INTRADAY: "${CATCHUP_INTERVALS_INTRADAY:-1m,5m,10m,15m,30m,1h}"
+
       # ── Backfill chunk sizes ─────────────────────────────────────────────
       BACKFILL_CHUNK_ANGEL_1M_DAYS: "${BACKFILL_CHUNK_ANGEL_1M_DAYS:-30}"
       BACKFILL_CHUNK_ANGEL_5M_15M_DAYS: "${BACKFILL_CHUNK_ANGEL_5M_15M_DAYS:-90}"
