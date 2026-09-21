@@ -38,6 +38,7 @@ from src.db.models.operations import (
     IngestionCheckpoint,
     CandleBarQuarantine,
 )
+from src.db.models.fo_universe import FoUniverse
 from src.db.models.reconciliation import (
     MarketDepth,
     ReconciliationRecord,
@@ -75,4 +76,6 @@ __all__ = [
     "ReconciliationRecord",
     "DataIncident",
     "ClosingAuctionSnapshot",
+    # F&O universe master
+    "FoUniverse",
 ]

@@ -79,6 +79,17 @@ NC    := \033[0m
         gen-secret \
         migrate shell-api shell-db \
         test lint fmt typecheck \
+        backfill-5y backfill-5y-dry backfill-5y-force backfill-5y-idx backfill-5y-eq backfill-5y-fo \
+        backfill-5y-fo-universe backfill-5y-all-spot \
+        load-fno load-fno-dry fix-fo-gaps \
+        load-bhavcopy-5y load-bhavcopy-5y-dry \
+        load-bhavcopy-futures load-bhavcopy-options \
+        build-continuous-futures build-continuous-futures-dry \
+        collect-options-snapshots \
+        fix-equity-partials \
+        seed-fo-universe seed-fo-universe-dry \
+        fix-all-gaps \
+        data-report \
         clean prune
 
 # =============================================================================
@@ -367,6 +378,235 @@ test-all: ## Run all tests including integration (requires live Redis + PostgreS
 	@printf "$(CYAN)[test]$(NC) Running full test suite (integration tests require running stack)...\n"
 	@if [ -f "$(ENV_FILE)" ]; then set -a && . ./$(ENV_FILE) && set +a; fi && \
 		pytest tests/
+
+
+# =============================================================================
+##@ Data Management
+# =============================================================================
+
+backfill-5y: ## Fetch last 5 years of NSE OHLCV data (IDX + EQ + FO) and upsert into the DB
+	@printf "$(CYAN)[backfill]$(NC) Starting 5-year Indian market backfill...\n"
+	@printf "          Instruments : NSE indices + Nifty 50 equities + NFO futures\n"
+	@printf "          Intervals   : 1m 5m 10m 15m 30m 1h 1d 1w 1M\n"
+	@printf "          Window      : ~5 years (~1826 calendar days)\n"
+	@printf "          Mode        : validate-and-update (existing rows are re-validated)\n"
+	@printf "          Rate limit  : concurrency=2, chunk-delay=0.4s, instrument-delay=1s\n"
+	@printf "$(YELLOW)          Tip: re-run safely — resumes from Redis checkpoint$(NC)\n\n"
+	$(DC) run --rm \
+		-e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/backfill_india_5y.py \
+			--concurrency $${CONCURRENCY:-2} \
+			--chunk-delay $${CHUNK_DELAY:-0.4} \
+			--instrument-delay $${INSTRUMENT_DELAY:-1.0} \
+			$${FORCE:+--force} \
+			$${SKIP_EXISTING:+--skip-existing} \
+			$${DRY_RUN:+--dry-run} \
+			$${CLASS:+--class $${CLASS}} \
+			$${SYMBOL:+--symbol $${SYMBOL} --class $${CLASS:-EQ}}
+	@printf "\n$(GREEN)[ok]$(NC)    5-year backfill complete.\n"
+
+backfill-5y-dry: ## Dry-run the 5-year backfill — print provider plan without touching DB
+	@$(MAKE) --no-print-directory backfill-5y DRY_RUN=1
+
+backfill-5y-force: ## Force full 5-year re-fetch (clears Redis checkpoints first)
+	@printf "$(YELLOW)[backfill]$(NC) Force mode: Redis checkpoints will be cleared.\n"
+	@$(MAKE) --no-print-directory backfill-5y FORCE=1
+
+backfill-5y-idx: ## 5-year backfill for NSE indices only
+	@$(MAKE) --no-print-directory backfill-5y CLASS=IDX
+
+backfill-5y-eq: ## 5-year backfill for Nifty 50 equities only
+	@$(MAKE) --no-print-directory backfill-5y CLASS=EQ
+
+backfill-5y-fo: ## 5-year backfill for NFO futures only (index + stock futures)
+	@$(MAKE) --no-print-directory backfill-5y CLASS=FO
+
+backfill-5y-fo-universe: ## 5-year spot backfill for all 233 F&O-eligible stocks (1d only, Yahoo Finance)
+	@printf "$(CYAN)[backfill]$(NC) 5-year spot backfill — full NSE F&O universe (233 stocks)...\n"
+	@printf "$(YELLOW)          Uses Yahoo Finance for 1d (no Upstox token required)$(NC)\n\n"
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/backfill_india_5y.py \
+			--class FO_UNIVERSE \
+			--intervals 1d \
+			--concurrency $${CONCURRENCY:-3} \
+			--chunk-delay $${CHUNK_DELAY:-0.3} \
+			$${FORCE:+--force}
+
+backfill-5y-all-spot: ## 5-year spot backfill for ALL instruments (Nifty50 + indices + F&O universe)
+	@$(MAKE) --no-print-directory backfill-5y CLASS=ALL_SPOT
+
+
+# =============================================================================
+##@ F&O Instrument Master
+# =============================================================================
+
+load-fno: ## Download Angel One scrip master and populate instrument_master + provider mappings
+	@printf "$(CYAN)[fno]$(NC) Loading F&O instruments from Angel One scrip master...\n"
+	@printf "          Source  : https://margincalculator.angelbroking.com (public, no auth)\n"
+	@printf "          Populates: instrument_master (expiry, underlying, tokens)\n"
+	@printf "                     instrument_provider_mapping (angel_one + upstox per contract)\n"
+	@printf "$(YELLOW)          Safe to re-run — fully idempotent (ON CONFLICT DO UPDATE)$(NC)\n\n"
+	$(DC) run --rm \
+		-e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/load_fno_instrument_master.py
+	@printf "\n$(GREEN)[ok]$(NC)    F&O instrument master loaded.\n"
+
+load-fno-dry: ## Dry-run the F&O instrument load — print stats without writing to DB
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/load_fno_instrument_master.py --dry-run
+
+fix-fo-gaps: ## Load F&O instruments then re-run the FO backfill to fill gaps
+	@printf "$(CYAN)[fix-fo]$(NC) Step 1/2: Loading F&O instrument master...\n"
+	@$(MAKE) --no-print-directory load-fno
+	@printf "\n$(CYAN)[fix-fo]$(NC) Step 2/2: Re-running 5-year FO backfill...\n"
+	@$(MAKE) --no-print-directory backfill-5y-fo
+
+
+# =============================================================================
+##@ ML Data — Bhavcopy, Continuous Futures, Options Chain
+# =============================================================================
+
+load-bhavcopy-5y: ## Download NSE F&O bhavcopy (5 years) → futures_candle + options_candle
+	@printf "$(CYAN)[bhavcopy]$(NC) Loading 5-year NSE F&O bhavcopy...\n"
+	@printf "          Source : https://nsearchives.nseindia.com/content/fo/ (public)\n"
+	@printf "          Loads  : futures_candle + options_candle at 1d resolution\n"
+	@printf "          Time   : ~3–5 hours for full 5-year range\n"
+	@printf "$(YELLOW)          Safe to re-run — idempotent ON CONFLICT DO UPDATE$(NC)\n\n"
+	$(DC) run --rm \
+		-e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/load_fo_bhavcopy_5y.py \
+			$${FROM_DATE:+--from-date $${FROM_DATE}} \
+			$${TO_DATE:+--to-date $${TO_DATE}} \
+			$${SYMBOL:+--symbol $${SYMBOL}} \
+			--delay $${DELAY:-0.5}
+	@printf "\n$(GREEN)[ok]$(NC)    Bhavcopy load complete.\n"
+
+load-bhavcopy-5y-dry: ## Dry-run the bhavcopy load — print plan without downloading
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/load_fo_bhavcopy_5y.py --dry-run
+
+load-bhavcopy-futures: ## Load bhavcopy futures only (faster — skips options)
+	@$(MAKE) --no-print-directory load-bhavcopy-5y EXTRA_FLAGS=--futures-only
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/load_fo_bhavcopy_5y.py \
+			--futures-only \
+			$${FROM_DATE:+--from-date $${FROM_DATE}} \
+			$${TO_DATE:+--to-date $${TO_DATE}} \
+			$${SYMBOL:+--symbol $${SYMBOL}} \
+			--delay $${DELAY:-0.5}
+
+load-bhavcopy-options: ## Load bhavcopy options only
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/load_fo_bhavcopy_5y.py \
+			--options-only \
+			$${FROM_DATE:+--from-date $${FROM_DATE}} \
+			$${TO_DATE:+--to-date $${TO_DATE}} \
+			$${SYMBOL:+--symbol $${SYMBOL}} \
+			--delay $${DELAY:-0.5}
+
+build-continuous-futures: ## Build Panama-adjusted continuous futures series → continuous_futures table
+	@printf "$(CYAN)[continuous]$(NC) Building Panama-adjusted continuous futures...\n"
+	@printf "          Prereq : futures_candle must be populated (run load-bhavcopy-5y first)\n"
+	@printf "          Output : continuous_futures table, one row per (underlying, date)\n\n"
+	$(DC) run --rm \
+		-e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/build_continuous_futures.py \
+			$${SYMBOL:+--symbol $${SYMBOL}}
+	@printf "\n$(GREEN)[ok]$(NC)    Continuous futures series built.\n"
+
+build-continuous-futures-dry: ## Dry-run the continuous futures builder
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/build_continuous_futures.py --dry-run \
+			$${SYMBOL:+--symbol $${SYMBOL}}
+
+collect-options-snapshots: ## Collect live option chain + IV + Greeks snapshots from Upstox
+	@printf "$(CYAN)[options]$(NC) Collecting option chain snapshots...\n"
+	@printf "          Requires: UPSTOX_ACCESS_TOKEN (expires daily)\n"
+	@printf "          Stores  : option_chain_snapshot + option_chain_contract\n"
+	@printf "$(YELLOW)          Schedule this at 09:20, 12:00, 15:29 IST for IV time series$(NC)\n\n"
+	$(DC) run --rm \
+		-e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/collect_options_chain_snapshots.py \
+			$${SYMBOLS:+--symbols $${SYMBOLS}} \
+			$${EXPIRY:+--expiry $${EXPIRY}}
+	@printf "\n$(GREEN)[ok]$(NC)    Options snapshots collected.\n"
+
+fix-equity-partials: ## Re-run 1w/1M backfill for BAJFINANCE, KOTAKBANK, NESTLEIND, GRASIM
+	@printf "$(CYAN)[fix-eq]$(NC) Fixing partial equity intervals (1w, 1M)...\n"
+	@printf "          Symbols: BAJFINANCE KOTAKBANK NESTLEIND GRASIM\n"
+	@printf "$(YELLOW)          Requires: UPSTOX_ACCESS_TOKEN refreshed in .env.local$(NC)\n\n"
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/backfill_india_5y.py \
+			--symbol BAJFINANCE --class EQ --intervals 1w 1M --force
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/backfill_india_5y.py \
+			--symbol KOTAKBANK --class EQ --intervals 1w 1M --force
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/backfill_india_5y.py \
+			--symbol NESTLEIND --class EQ --intervals 1w 1M --force
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/backfill_india_5y.py \
+			--symbol GRASIM --class EQ --intervals 1d --force
+	@printf "\n$(GREEN)[ok]$(NC)    Equity partial intervals fixed.\n"
+
+seed-fo-universe: ## Populate fo_universe table from DB history + Angel One scrip master
+	@printf "$(CYAN)[fo_universe]$(NC) Seeding F&O universe master table...\n"
+	@printf "          Sources: options_candle, futures_candle, Angel One scrip master\n"
+	@printf "$(YELLOW)          Safe to re-run — idempotent ON CONFLICT DO UPDATE$(NC)\n\n"
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/seed_fo_universe.py
+	@printf "\n$(GREEN)[ok]$(NC)    fo_universe seeded.\n"
+
+seed-fo-universe-dry: ## Dry-run the fo_universe seed — show what would be inserted
+	$(DC) run --rm -e APP_ENV=$${APP_ENV:-local} \
+		api python scripts/seed_fo_universe.py --dry-run
+
+fix-all-gaps: ## Run the full ML gap remediation sequence (takes several hours)	@printf "$(BOLD)$(CYAN)╔══════════════════════════════════════════════════════════╗$(NC)\n"
+	@printf "$(BOLD)$(CYAN)║   ML DATA GAP REMEDIATION — fix-all-gaps                ║$(NC)\n"
+	@printf "$(BOLD)$(CYAN)╚══════════════════════════════════════════════════════════╝$(NC)\n"
+	@printf "\n$(YELLOW)Steps to run:$(NC)\n"
+	@printf "  1. migrate              — apply DB schema (continuous_futures table)\n"
+	@printf "  2. fix-equity-partials  — fill BAJFINANCE/KOTAKBANK/NESTLEIND/GRASIM gaps\n"
+	@printf "  3. load-bhavcopy-5y     — 5y NSE F&O bhavcopy → futures_candle + options_candle\n"
+	@printf "  4. build-continuous-futures — Panama-adjusted series\n"
+	@printf "\n$(YELLOW)Estimated total time: 4–6 hours$(NC)\n\n"
+	@printf "$(CYAN)[step 1/4]$(NC) Running DB migrations...\n"
+	@$(MAKE) --no-print-directory migrate
+	@printf "\n$(CYAN)[step 2/4]$(NC) Fixing equity partial intervals...\n"
+	@$(MAKE) --no-print-directory fix-equity-partials
+	@printf "\n$(CYAN)[step 3/4]$(NC) Loading 5-year bhavcopy (futures only first)...\n"
+	@$(MAKE) --no-print-directory load-bhavcopy-futures
+	@printf "\n$(CYAN)[step 4/4]$(NC) Building continuous futures series...\n"
+	@$(MAKE) --no-print-directory build-continuous-futures
+	@printf "\n$(GREEN)$(BOLD)✓ fix-all-gaps complete.$(NC)\n"
+	@printf "  Run 'make data-report' to see updated row counts.\n\n"
+
+data-report: ## Print ML data status — row counts and date ranges per table
+	@printf "$(CYAN)[report]$(NC) ML Data Status Report\n"
+	@printf "$(CYAN)─────────────────────────────────────────────────────────$(NC)\n"
+	$(DC) exec -T postgres psql -U $${POSTGRES_USER:-mds_user} -d $${POSTGRES_DB:-mds} \
+		--no-psqlrc -P pager=off -c \
+		"SELECT tbl, interval_str, \
+		  to_char(rows,'999,999,999') AS rows, \
+		  first_date, last_date, instruments \
+		 FROM ( \
+		   SELECT 'equity_candle' AS tbl, interval_str, COUNT(*) AS rows, \
+		     MIN(time)::date AS first_date, MAX(time)::date AS last_date, \
+		     COUNT(DISTINCT instrument_id) AS instruments \
+		   FROM equity_candle GROUP BY interval_str \
+		   UNION ALL \
+		   SELECT 'futures_candle', interval_str, COUNT(*), \
+		     MIN(time)::date, MAX(time)::date, COUNT(DISTINCT instrument_id) \
+		   FROM futures_candle GROUP BY interval_str \
+		   UNION ALL \
+		   SELECT 'options_candle', interval_str, COUNT(*), \
+		     MIN(time)::date, MAX(time)::date, COUNT(DISTINCT instrument_id) \
+		   FROM options_candle GROUP BY interval_str \
+		   UNION ALL \
+		   SELECT 'continuous_futures', '1d', COUNT(*), \
+		     MIN(date), MAX(date), COUNT(DISTINCT underlying_id) \
+		   FROM continuous_futures \
+		 ) t ORDER BY tbl, interval_str;"
 
 
 # =============================================================================
