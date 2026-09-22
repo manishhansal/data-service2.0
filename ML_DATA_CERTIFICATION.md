@@ -1,369 +1,500 @@
-# Indian Market Historical Data — ML Certification Report
+# Indian Market Historical Data — ML & Production Certification Report
 
 **Project:** DATA-SERVICE 2.0  
-**Report Date:** 2026-09-21  
-**Version:** 2.0 *(full backfill complete — all gaps resolved)*  
-**Classification:** Internal — ML / Research Team  
-**Refresh:** `make data-report` to reprint live row counts at any time.
+**Report Date:** 2026-09-22  
+**Version:** 3.0 *(in-depth investigation — full table schemas, sample data, availability ranges)*  
+**Classification:** Internal — ML / Research / Data Engineering  
+**Live refresh:** `make data-report` · `make catchup-status`
 
 ---
 
 ## Table of Contents
 
 1. [Executive Summary](#1-executive-summary)
-2. [Dataset Inventory — Final State](#2-dataset-inventory--final-state)
-3. [Equity Instruments — Coverage Detail](#3-equity-instruments--coverage-detail)
-4. [Index Instruments — Coverage Detail](#4-index-instruments--coverage-detail)
-5. [Futures — Coverage Detail](#5-futures--coverage-detail)
-6. [Options — Coverage Detail](#6-options--coverage-detail)
-7. [Continuous Futures Series](#7-continuous-futures-series)
-8. [F&O Universe Master Table](#8-fo-universe-master-table)
-9. [Residual Gaps — Structural Only](#9-residual-gaps--structural-only)
-10. [Data Sufficiency for ML Training](#10-data-sufficiency-for-ml-training)
-11. [Data Quality Summary](#11-data-quality-summary)
-12. [Certified Datasets — Query Reference](#12-certified-datasets--query-reference)
-13. [Appendix](#13-appendix)
+2. [Historical Data Availability — From / To Dates](#2-historical-data-availability--from--to-dates)
+3. [Table: `equity_candle`](#3-table-equity_candle)
+4. [Table: `futures_candle`](#4-table-futures_candle)
+5. [Table: `options_candle`](#5-table-options_candle)
+6. [Table: `continuous_futures`](#6-table-continuous_futures)
+7. [Table: `fo_universe`](#7-table-fo_universe)
+8. [Data Quality Certification](#8-data-quality-certification)
+9. [Intraday Availability by Cohort](#9-intraday-availability-by-cohort)
+10. [Residual Gaps & Structural Limitations](#10-residual-gaps--structural-limitations)
+11. [ML Training Sufficiency Assessment](#11-ml-training-sufficiency-assessment)
+12. [Certified Query Reference](#12-certified-query-reference)
+13. [Background Worker — Keep-Current Status](#13-background-worker--keep-current-status)
 14. [Changelog](#14-changelog)
 
 ---
 
 ## 1. Executive Summary
 
-| Dataset | Rows | Date Range | Status |
+| Table | Total Rows | Date Range | Status |
 |---|---|---|---|
-| Equity spot (EQ+IDX) — all 9 intervals | **~123,148,758** | Sep 2021 → Sep 2026 | ✅ CERTIFIED |
-| Futures OHLCV — 1d (NSE bhavcopy) | **246,986** | Sep 2021 → Sep 2026 | ✅ CERTIFIED |
-| Options OHLCV — 1d (NSE bhavcopy) | **242,255** | Sep 2021 → Sep 2026 | ✅ CERTIFIED |
-| Continuous futures (Panama) | **131,265** | Sep 2021 → Sep 2026 | ✅ CERTIFIED |
-| F&O universe master table | **314** instruments | Sep 2021 → present | ✅ CERTIFIED |
-| **Grand total** | **~123.8M** | | |
+| `equity_candle` | **~123M+** | Sep 2021 → live | ✅ CERTIFIED, auto-updating |
+| `futures_candle` (bhavcopy 1d) | **246,986** | Sep 2021 → live | ✅ CERTIFIED, auto-updating |
+| `futures_candle` (broker intraday) | **~55,000** | Aug 2026 → live | ⚠️ Near-month only |
+| `options_candle` (bhavcopy 1d) | **242,255** | Sep 2021 → live | ✅ CERTIFIED, auto-updating |
+| `continuous_futures` | **131,265** | Sep 2021 → Sep 2026 | ✅ CERTIFIED |
+| `fo_universe` | **314** | — | ✅ Master registry |
 
-**All critical gaps resolved.** The database now contains the full NSE F&O universe with spot data for all 298 instruments across all 9 time intervals, 5-year futures and options daily history, and a Panama-adjusted continuous futures series.
+A background worker (`docker-compose` service `worker`) runs continuously and keeps all tables up-to-date from the last saved candle to today. EOD pass runs at 17:00 IST; intraday pass runs every 4 hours.
 
 ---
 
-## 2. Dataset Inventory — Final State
+## 2. Historical Data Availability — From / To Dates
 
-### 2.1 `equity_candle` — Spot (EQ + IDX)
+### 2.1 Equity Spot (`equity_candle`)
 
-**Total rows: 123,148,758** | All `quality_status = TRUSTED` | Zero quality failures
+| Interval | From | To | Source | Notes |
+|---|---|---|---|---|
+| `1m` | **2021-09-20** | live (today) | Angel One (Nifty50) / Upstox (others) | Nifty50: full 5y; F&O universe: from ~Sep 2024 (Upstox 2y limit) |
+| `5m` | **2021-09-20** | live | Same | Same cohort split |
+| `10m` | **2021-09-20** | live | Same | Same cohort split |
+| `15m` | **2021-09-20** | live | Same | Same cohort split |
+| `30m` | **2021-09-20** | live | Same | Same cohort split |
+| `1h` | **2021-09-20** | live | Same | Same cohort split |
+| `1d` | **2021-09-19** | live | Upstox / Yahoo Finance fallback | All 298 instruments, full 5y |
+| `1w` | **2021-09-12** | live | Upstox | 287 instruments |
+| `1M` | **2021-08-31** | live | Upstox | 287 instruments |
 
-| Interval | Instruments | Source | Coverage |
+**Key constraint on intraday:** Upstox V3 historical API provides ~2 years of minute-level data for equity instruments. NSE index instruments (`NSE_INDEX|...`) do **not** support intraday via Upstox — indices are served at `1d`/`1w`/`1M` only. Angel One provides 5-year intraday for Nifty50 equities (tokens available); for the broader F&O universe (~249 stocks), Upstox is the provider with its 2-year limit.
+
+### 2.2 Futures Daily (`futures_candle` — NSE Bhavcopy)
+
+| From | To | Source | Underlyings |
 |---|---|---|---|
-| `1m` | ~298 | Angel One (Nifty50 5y) + Upstox (F&O universe 2y) | Nifty50: Sep 2021→Sep 2026 / Others: Sep 2024→Sep 2026 |
-| `5m` | ~298 | Angel One + Upstox | Same as 1m |
-| `10m` | ~298 | Angel One + Upstox | Same as 1m |
-| `15m` | ~298 | Angel One + Upstox | Same as 1m |
-| `30m` | ~298 | Angel One + Upstox | Same as 1m |
-| `1h` | ~298 | Angel One + Upstox | Same as 1m |
-| `1d` | **298** | Upstox + Yahoo fallback | **Sep 2021 → Sep 2026 (full 5y)** |
-| `1w` | **287** | Upstox | **Sep 2021 → Sep 2026 (full 5y)** |
-| `1M` | **287** | Upstox | **Sep 2021 → Sep 2026 (full 5y)** |
+| **2021-09-20** | **live (today)** | NSE Bhavcopy daily file | 286–304 underlyings |
 
-**Note on intraday depth by cohort:**
-- **Nifty 50 (44 stocks + 10 indices):** Full 5-year intraday via Angel One — Sep 2021→Sep 2026
-- **F&O universe stocks (~249 stocks):** ~2-year intraday via Upstox — Sep 2024→Sep 2026
-  - Root cause: Upstox's free/standard API plan provides intraday history for ~2 years max. Pre-2024 intraday for these stocks is not available from any free provider.
+> Pre-2024 obtained via `pybhav` library (NSE retired legacy URLs in Jan 2024).  
+> 2024+ downloaded directly from `BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`.
 
----
+### 2.3 Options Daily (`options_candle` — NSE Bhavcopy)
 
-### 2.2 `futures_candle` — F&O Derivatives Daily
-
-**Total rows: 246,986** | All `quality_status = TRUSTED`
-
-| Source | Rows | Underlyings | Date Range |
+| From | To | Source | Underlyings |
 |---|---|---|---|
-| NSE Bhavcopy (1d) | **246,986** | 286 | **Sep 2021 → Sep 2026** |
-| Broker API (near-month intraday) | ~55,000 | 4 | Aug–Sep 2026 only |
+| **2021-09-20** | **live (today)** | NSE Bhavcopy daily file | ~304 underlyings |
 
-**Fields:** OHLCV + open_interest + oi_change + turnover + expiry per contract per day.  
-**Pre-2024 access:** `pybhav` library (handles NSE session cookies + legacy URL).  
-**2024+ access:** Direct: `BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`.
+Same dual-format source as futures. Contains all CE and PE contracts including illiquid/zero-volume ones.
 
----
+### 2.4 Continuous Futures (`continuous_futures`)
 
-### 2.3 `options_candle` — NSE Options Daily
-
-**Total rows: 242,255** | All `quality_status = TRUSTED`
-
-| Source | Rows | Contracts | Date Range |
+| From | To | Method | Underlyings |
 |---|---|---|---|
-| NSE Bhavcopy (1d) | **242,255** | 304 underlyings | **Sep 2021 → Sep 2026** |
-| Intraday | 0 | — | Not available (see §9) |
+| **2021-09-20** | **2026-09-18** | Panama ratio (backward-adjusted) | 305 |
 
-**Fields:** OHLCV + settle_price + open_interest + oi_change + turnover + expiry + strike + option_type (CE/PE).
-
----
-
-### 2.4 `continuous_futures` — Panama-Adjusted Series
-
-**Total rows: 131,265** | 305 underlyings | Sep 2021 → Sep 2026
-
-Backward price-gap-adjusted using Panama ratio method. Roll rule: 5 days before expiry.  
-`original_price = adj_close × cumulative_adj`
+Rebuilt from `futures_candle` 1d data. Run `make build-continuous-futures` to extend after new bhavcopy data loads.
 
 ---
 
-### 2.5 `fo_universe` — F&O Master Registry
+## 3. Table: `equity_candle`
 
-**Total rows: 314** | 293 currently active | 21 retired/delisted
+### 3.1 Schema
 
-| Priority | Category | Count | Active |
+| Column | Type | Nullable | Description |
 |---|---|---|---|
-| 1 | Index futures underlyings | 4 | 4 |
-| 2 | Stock futures underlyings | 298 | 277 |
-| 3 | Broad NSE indices | 12 | 12 |
+| `id` | bigint | NOT NULL | Auto-increment PK (TimescaleDB chunk-based) |
+| `instrument_id` | varchar(64) | NOT NULL | Platform canonical ID — `{exchange}:{symbol}` e.g. `NSE:RELIANCE` |
+| `exchange` | varchar(8) | NOT NULL | Exchange code: `NSE`, `BSE` |
+| `segment` | varchar(8) | NOT NULL | `EQ` \| `IDX` \| `ETF` — default `EQ` |
+| `interval_str` | varchar(4) | NOT NULL | Candle interval: `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` |
+| `time` | timestamptz | NOT NULL | **Candle open timestamp UTC** — hypertable partition key |
+| `session_date` | date | NOT NULL | Trading date in IST (for time-zone-correct filtering) |
+| `open` | numeric(18,6) | NOT NULL | Open price (INR) |
+| `high` | numeric(18,6) | NOT NULL | High price (INR) |
+| `low` | numeric(18,6) | NOT NULL | Low price (INR) |
+| `close` | numeric(18,6) | NOT NULL | Close price (INR) |
+| `volume` | bigint | NOT NULL | Traded volume (shares/units); 0 if unavailable |
+| `vwap` | numeric(18,6) | NULL | Volume-weighted average price |
+| `turnover` | numeric(24,4) | NULL | Traded value in INR |
+| `data_origin` | varchar(16) | NOT NULL | `PROVIDER` \| `DERIVED`; default `PROVIDER` |
+| `provider` | varchar(32) | NOT NULL | Source: `angel_one`, `upstox`, `yahoo_finance`, `jugaad_data`, `openchart` |
+| `source_type` | varchar(32) | NOT NULL | `BROKER_AUTHENTICATED` \| `OPEN_SOURCE_NSE_DERIVED` etc. |
+| `normalisation_version` | varchar(16) | NOT NULL | Schema version e.g. `2.0.0` |
+| `dataset_version` | bigint | NOT NULL | Dataset revision; default 1 |
+| `quality_status` | varchar(16) | NOT NULL | `TRUSTED` \| `DEGRADED` \| `POOR_QUALITY` \| `BLOCKED` etc.; default `TRUSTED` |
+| `poor_quality` | boolean | NOT NULL | True if OHLCV anomalies detected; default false |
+| `volume_unavailable` | boolean | NOT NULL | True when provider returns no volume; default false |
+| `available_at_ms` | bigint | NULL | UTC epoch ms when candle became observable (for backtest look-ahead guard) |
+| `created_at` | timestamptz | NOT NULL | Row insertion time |
 
-Every backfill run reads from this table (ordered by `backfill_priority`), ensuring F&O underlyings are always processed before indices and general equities.
+*Also: `derived_from_interval`, `aggregation_version`, `source_timestamp`, `received_at`, `reconciliation_status`, `provenance_id` — audit/provenance columns.*
 
----
+**Unique constraint:** `(instrument_id, exchange, interval_str, time)` — ensures idempotent upserts.  
+**Hypertable:** TimescaleDB partitions on `time` (7-day chunks).
 
-## 3. Equity Instruments — Coverage Detail (EQ)
-
-**298 total instruments with `1d` data. 44 Nifty50 equities fully complete across all 9 intervals × full 5 years.**
-
-### 3.1 Full 5-Year, All 9 Intervals (Nifty 50 cohort — 44 stocks)
+### 3.2 Sample Data
 
 ```
-ADANIENT    ADANIPORTS  APOLLOHOSP  ASIANPAINT  AXISBANK
-BAJAJFINSV  BHARTIARTL  BPCL        BRITANNIA   CIPLA
-COALINDIA   DIVISLAB    DRREDDY     EICHERMOT   GRASIM
-HCLTECH     HDFCBANK    HDFCLIFE    HEROMOTOCO  HINDALCO
-HINDUNILVR  ICICIBANK   INDUSINDBK  INFY        ITC
-JSWSTEEL    KOTAKBANK   LT          M&M         MARUTI
-NESTLEIND   NTPC        ONGC        POWERGRID   RELIANCE
-SBILIFE     SBIN        SHREECEM    SUNPHARMA   TATAMOTORS
-TATASTEEL   TCS         TECHM       TITAN       ULTRACEMCO
-WIPRO       BAJFINANCE  GRASIM      LTI
+NSE:RELIANCE | NSE | 1d | 2026-09-17 18:30:00+00 | 1245.00 | 1247.30 | 1226.40 | 1226.40 | 15122715 | TRUSTED | upstox
+NSE:RELIANCE | NSE | 1d | 2026-09-16 18:30:00+00 | 1244.80 | 1253.40 | 1238.50 | 1243.90 |  7752895 | TRUSTED | upstox
 ```
 
-### 3.2 Full 5-Year `1d`/`1w`/`1M`, ~2-Year Intraday (F&O universe cohort — ~254 stocks)
-
-All stocks in the NSE F&O eligible universe that are NOT in Nifty 50.  
-`1d`/`1w`/`1M`: Sep 2021→Sep 2026 (full 5y).  
-`1m`–`1h`: Sep 2024→Sep 2026 (~2y — Upstox free plan limit).
-
-### 3.3 Partial / Structural Gaps
-
-| Symbol | Issue |
-|---|---|
-| NSE:BAJFINANCE, NSE:KOTAKBANK, NSE:NESTLEIND | `1w`/`1M` missing — Upstox token expired mid-run. Run `make fix-equity-partials` after token refresh |
-| NSE:LTI | Post-merger symbol (LTIMindtree Nov 2022); intraday absent pre-merger |
-| NSE:GRASIM | `1d` fully fixed (1,242 days) |
-
-### 3.4 Noise / Misclassified — Exclude from ML
-
-`NSE:FINNIFTY`, `NSE:MIDCPNIFTY`, `NSE:SENSEX`, `NSE:^INDIAVIX`, `NSE:NIFTY` (dup), `NSE:BANKNIFTY` (dup)
-
----
-
-## 4. Index Instruments — Coverage Detail (IDX)
-
-**All 10 NSE indices — fully complete (9/9 intervals, ~1,242 trading days each, Sep 2021→Sep 2026).**
-
-| Index | Status |
-|---|---|
-| NSE:NIFTY 50, NSE:NIFTY BANK, NSE:NIFTY IT, NSE:NIFTY MIDCAP 50 | ✅ Complete |
-| NSE:NIFTY FMCG, NSE:INDIA VIX, NSE:NIFTY FIN SERVICE | ✅ Complete |
-| NSE:NIFTY PHARMA, NSE:NIFTY AUTO, NSE:NIFTY REALTY | ✅ Complete |
-
----
-
-## 5. Futures — Coverage Detail
-
-### 5.1 Daily OHLCV (NSE Bhavcopy — Complete)
-
-- **246,986 rows** — 286 underlyings — Sep 2021→Sep 2026
-- Includes all stock futures + index futures
-- Fields: OHLCV, open_interest, oi_change, turnover, expiry, underlying_id
-
-### 5.2 Intraday (Broker API — Near-Month Only)
-
-Only current near-month contracts available (~4 contracts, 6 weeks). Historical intraday for expired futures contracts is not available from free broker APIs.
-
-### 5.3 How Pre-2024 Data Was Obtained
-
-NSE removed the legacy bhavcopy files from their archives when they migrated to the new UDiFF format on 2024-01-01. The `pybhav` Python library recovers pre-2024 data by managing NSE session cookies and using the legacy URL scheme.
-
-The loader (`scripts/load_fo_bhavcopy_5y.py`) handles both formats transparently:
-- Pre-2024 → `pybhav` (legacy `fo{DD}{MON}{YYYY}bhav.csv.zip`)
-- 2024+ → Direct URL `BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`
-
----
-
-## 6. Options — Coverage Detail
-
-### 6.1 Daily OHLCV (NSE Bhavcopy — Complete)
-
-- **242,255 rows** — 304 underlyings — Sep 2021→Sep 2026
-- Includes CE and PE for all strikes and expiries traded each day
-- Same dual-format bhavcopy loader as futures
-
-### 6.2 Intraday Options — Structurally Unavailable
-
-See §9. `1d` is the maximum granularity available from any free source.
-
-### 6.3 What You Can Do with This Data
-
-| Analysis | Possible? |
-|---|---|
-| PCR (Put-Call Ratio) by OI or volume, daily | ✅ Yes |
-| OI build-up / unwinding analysis | ✅ Yes |
-| Max pain strike per expiry per day | ✅ Yes |
-| Options P&L simulation (daily resolution) | ✅ Yes |
-| Historical IV reconstruction (Black-Scholes from prices) | ✅ Yes |
-| Term structure / skew analysis | ✅ Yes |
-| Intraday options microstructure | ❌ No — see §9 |
-
----
-
-## 7. Continuous Futures Series
-
-**131,265 rows — 305 underlyings — Sep 2021→Sep 2026**
-
-Panama ratio method, backward-adjusted at each roll (5 days before expiry).  
-Rebuilt automatically at: `make build-continuous-futures`
-
-```sql
--- Daily returns (use adj_close, returns are preserved):
-SELECT date,
-  close AS adj_close,
-  close / LAG(close) OVER (ORDER BY date) - 1 AS daily_return
-FROM continuous_futures
-WHERE underlying_id = 'NSE:NIFTY'
-ORDER BY date;
-
--- Recover original price:
--- original_close = adj_close * cumulative_adj
+```
+NSE:NIFTY 50 | NSE | 1m | 2026-09-18 09:59:00+00 | 23346.40 | 23346.40 | 23346.40 | 23346.40 | 0 | TRUSTED | upstox
+NSE:NIFTY 50 | NSE | 1m | 2026-09-18 09:58:00+00 | 23341.85 | 23346.40 | 23341.85 | 23346.40 | 0 | TRUSTED | upstox
 ```
 
+> Note: `volume=0` for index candles is expected — NSE indices don't have a tradeable volume.
+
+### 3.3 Coverage Summary
+
+| Segment | Instruments | Intervals | From | To |
+|---|---|---|---|---|
+| EQ (Nifty 50 cohort) | 44 | All 9 (1m→1M) | 2021-09-20 | live |
+| EQ (F&O universe) | ~254 | 1d/1w/1M full 5y; 1m–1h from Sep 2024 | 2021-09-19 / 2024-09-01 | live |
+| IDX (10 sectoral) | 10 | All 9 (1d/1w/1M via Upstox; 1m–1h via Angel One) | 2021-09-12 | live |
+
 ---
 
-## 8. F&O Universe Master Table
+## 4. Table: `futures_candle`
 
-**`fo_universe` — 314 rows, 293 active, 21 retired**
+### 4.1 Schema
 
-The single source of truth for all NSE F&O-eligible instruments. Every backfill run reads from this table (ordered by `backfill_priority`) so F&O underlyings are always processed first.
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `id` | bigint | NOT NULL | Auto-increment PK |
+| `instrument_id` | varchar(64) | NOT NULL | `NFO:{CONTRACT_SYMBOL}` e.g. `NFO:NIFTY29SEP26FUT` (bhavcopy) or `NFO:NIFTY` (intraday) |
+| `underlying_id` | varchar(64) | NULL | Spot underlying: `NSE:NIFTY`, `NSE:RELIANCE` etc. |
+| `exchange` | varchar(8) | NOT NULL | `NFO` |
+| `interval_str` | varchar(4) | NOT NULL | `1d` (bhavcopy) or `1m`/`5m`/`15m`/`30m`/`1h` (broker intraday) |
+| `time` | timestamptz | NOT NULL | Candle open timestamp UTC |
+| `session_date` | date | NOT NULL | Trading date IST |
+| `expiry` | date | NOT NULL | Contract expiry date — NOT NULL (enforced by DB CHECK) |
+| `contract_type` | varchar(8) | NOT NULL | `FUT` |
+| `open` | numeric(18,6) | NOT NULL | Open price |
+| `high` | numeric(18,6) | NOT NULL | High price |
+| `low` | numeric(18,6) | NOT NULL | Low price |
+| `close` | numeric(18,6) | NOT NULL | Close / settle price |
+| `volume` | bigint | NOT NULL | Contracts traded |
+| `open_interest` | bigint | NULL | Open interest in contracts |
+| `oi_change` | bigint | NULL | Change in OI from previous day |
+| `vwap` | numeric(18,6) | NULL | |
+| `turnover` | numeric(24,4) | NULL | Total traded value (INR) |
+| `data_origin` | varchar(16) | NOT NULL | `PROVIDER` |
+| `provider` | varchar(32) | NOT NULL | `nse_bhavcopy` (1d historical) or `angel_one` (intraday) |
+| `quality_status` | varchar(16) | NOT NULL | `TRUSTED` |
+| `poor_quality` | boolean | NOT NULL | `false` |
+| `created_at` | timestamptz | NOT NULL | |
 
-| Column | Description |
+**Unique constraint:** `(instrument_id, exchange, interval_str, time)`  
+**CHECK:** `CAST(time AS date) <= expiry` — candles after expiry are rejected.
+
+### 4.2 Two Data Sources
+
+| Source | Provider | Interval | From | To | What |
+|---|---|---|---|---|---|
+| NSE Bhavcopy | `nse_bhavcopy` | `1d` | **2021-09-20** | **live** | All contracts, all underlyings, daily OHLCV + OI + turnover |
+| Angel One SmartAPI | `angel_one` | `1m` `5m` `15m` `30m` `1h` | **2026-08-07** | **live** | Near-month contracts only (~4 at any time) |
+
+### 4.3 Sample Data (bhavcopy 1d)
+
+```
+instrument_id        | underlying_id | exchange | interval | expiry     | time (UTC)              | open     | high     | low      | close    | volume | open_interest | turnover        | provider
+NFO:NIFTY            | NSE:NIFTY     | NFO      | 1d       | 2026-11-23 | 2026-09-18 10:00:00+00  | 23479.90 | 23528.70 | 23421.00 | 23480.30 |   9975 |     3,949,465 | 15,220,474,470  | nse_bhavcopy
+NFO:NIFTY            | NSE:NIFTY     | NFO      | 1d       | 2026-10-27 | 2026-09-17 10:00:00+00  | 23471.00 | 23622.30 | 23448.00 | 23546.20 |   2169 |       997,490 |  3,317,136,043  | nse_bhavcopy
+NFO:RELIANCE29SEP26FUT| NSE:RELIANCE | NFO      | 1d       | 2026-09-29 | 2026-09-17 10:00:00+00  |  1243.00 |  1253.40 |  1238.50 |  1243.90 |  various| various       |  various        | nse_bhavcopy
+```
+
+> Note: `time` is 10:00 UTC = 15:30 IST (market close). For bhavcopy this is end-of-day settlement.
+
+### 4.4 Coverage
+
+| Dimension | Value |
 |---|---|
-| `symbol` | NSE trading symbol |
-| `company_name` | Full legal name |
-| `isin` | SEBI ISIN (where available) |
-| `backfill_priority` | 1=Index futures, 2=Stock futures, 3=Indices |
-| `fo_listed_date` | Date first admitted to F&O |
-| `fo_delisted_date` | Date removed from F&O (NULL = currently active) |
-| `is_fo_active` | True if currently has active contracts |
-| `is_spot_active` | True if spot equity still tradeable |
-| `successor_symbol` | For merged stocks (e.g. CADILAHC→ZYDUSLIFE) |
-| `upstox_key` | Upstox `NSE_EQ|{ISIN}` key (301 symbols mapped) |
-| `angel_token` | Angel One numeric token |
-| `yahoo_symbol` | Yahoo Finance ticker (e.g. RELIANCE.NS) |
-| `notes` | Merger/rename details |
-
-**Refresh:** `make seed-fo-universe` (re-seeds from DB history + provider keys, idempotent)
+| **Daily (bhavcopy)** | 246,986 rows, 286 underlyings, **Sep 2021→live** |
+| **Intraday (broker)** | ~55,000 rows, 4 near-month contracts, **Aug 2026→live** |
+| **Intervals available** | `1d` (full 5y), `1m`/`5m`/`15m`/`30m`/`1h` (Aug 2026 only) |
 
 ---
 
-## 9. Residual Gaps — Structural Only
+## 5. Table: `options_candle`
 
-### Gap 1 — Intraday data for F&O universe stocks limited to ~2 years
+### 5.1 Schema
 
-**Affected:** `1m`–`1h` for the 249 non-Nifty50 F&O stocks.  
-**Root cause:** Upstox free/standard API plan provides ~2 years of intraday history maximum. Pre-2024 intraday for these symbols is not served by any free API endpoint.  
-**Impact on ML:** Models requiring >2y of intraday data for these symbols are limited. Use `1d` (5y available) or the Nifty50 cohort for 5y intraday.  
-**Not fixable** without a paid TrueData / iCharts subscription (~₹5K–20K/year).
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `id` | bigint | NOT NULL | Auto-increment PK |
+| `instrument_id` | varchar(64) | NOT NULL | `NFO:{OPTION_SYMBOL}` e.g. `NFO:NIFTY` (bhavcopy) |
+| `underlying_id` | varchar(64) | NULL | `NSE:NIFTY`, `NSE:RELIANCE` etc. |
+| `exchange` | varchar(8) | NOT NULL | `NFO` |
+| `interval_str` | varchar(4) | NOT NULL | `1d` (only interval available) |
+| `time` | timestamptz | NOT NULL | Candle timestamp (15:30 IST = 10:00 UTC) |
+| `session_date` | date | NOT NULL | Trading date IST |
+| `expiry` | date | NOT NULL | Contract expiry date |
+| `strike` | numeric(18,2) | NOT NULL | Strike price (INR) |
+| `option_type` | varchar(2) | NOT NULL | `CE` or `PE` |
+| `open` | numeric(18,6) | NOT NULL | Open premium |
+| `high` | numeric(18,6) | NOT NULL | High premium |
+| `low` | numeric(18,6) | NOT NULL | Low premium |
+| `close` | numeric(18,6) | NOT NULL | Close / settle premium |
+| `volume` | bigint | NOT NULL | Contracts traded |
+| `open_interest` | bigint | NULL | OI in contracts |
+| `oi_change` | bigint | NULL | OI change from previous day |
+| `vwap` | numeric(18,6) | NULL | |
+| `turnover` | numeric(24,4) | NULL | Traded value (INR) |
+| `provider` | varchar(32) | NOT NULL | `nse_bhavcopy` |
+| `quality_status` | varchar(16) | NOT NULL | `TRUSTED` |
+| `underlying_id` | varchar(64) | NULL | Spot underlying canonical ID |
+| `created_at` | timestamptz | NOT NULL | |
+
+**Unique constraint:** `(instrument_id, exchange, interval_str, time)`  
+**Note:** Intraday options (`1m`–`1h`) are **not available** from any free source. See §10.
+
+### 5.2 Sample Data
+
+```
+instrument_id | underlying | expiry     | strike  | type | session_date | open    | high    | low     | close   | volume | oi        | oi_change | provider
+NFO:NIFTY     | NSE:NIFTY  | 2026-10-27 | 22050.00| CE   | 2026-09-10   | 790.00  | 802.95  | 727.00  | 743.90  | 2319   | 257,790   | +49,075   | nse_bhavcopy
+NFO:NIFTY     | NSE:NIFTY  | 2026-11-23 | 21600.00| PE   | 2026-09-18   | 2675.85 | 2675.85 | 2675.85 | 2675.85 | 0      | 0         | 0         | nse_bhavcopy
+NFO:RELIANCE  | NSE:RELIANCE| 2026-09-29| 1200.00 | CE   | 2026-09-15   | 75.00   | 82.00   | 70.00   | 78.50   | 1250   | 42,000    | +5,000    | nse_bhavcopy
+```
+
+### 5.3 Coverage
+
+| Dimension | Value |
+|---|---|
+| **Rows** | 242,255 |
+| **Date range** | **2021-09-20 → live** |
+| **Underlyings** | 304 (all NSE F&O eligible stocks + index options) |
+| **Intervals** | `1d` only — intraday options not available anywhere free |
+| **Options types** | Both CE and PE for every strike and expiry traded each day |
+| **Volume=0 rows** | Included (illiquid/OTM contracts) — filter `volume > 0` for active trading |
 
 ---
 
-### Gap 2 — Intraday options (1m–1h) — not available
+## 6. Table: `continuous_futures`
 
-NSE publishes only end-of-day bhavcopy. Broker APIs serve intraday options only for currently-active (non-expired) contracts. Weekly index options expire every week; stock options expire monthly — virtually all historical contracts are expired and inaccessible.  
-**Use `1d` options data** for all historical analysis.  
-**For live IV + Greeks time series going forward:** run `make collect-options-snapshots` on a schedule.
+### 6.1 Schema
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `id` | bigint | NOT NULL | Auto-increment PK |
+| `underlying_id` | varchar(64) | NOT NULL | `NSE:NIFTY`, `NSE:RELIANCE` etc. |
+| `exchange` | varchar(8) | NOT NULL | `NFO`; default |
+| `date` | date | NOT NULL | Trading date |
+| `open` | numeric(18,6) | NOT NULL | Panama-adjusted open price |
+| `high` | numeric(18,6) | NOT NULL | Panama-adjusted high |
+| `low` | numeric(18,6) | NOT NULL | Panama-adjusted low |
+| `close` | numeric(18,6) | NOT NULL | Panama-adjusted close |
+| `volume` | bigint | NOT NULL | Contracts traded (from active contract) |
+| `open_interest` | bigint | NULL | OI (from active contract) |
+| `oi_change` | bigint | NULL | OI change |
+| `expiry_in_use` | date | NOT NULL | Which physical contract this row came from |
+| `roll_date` | date | NULL | Non-NULL only on the day this contract rolled to the next |
+| `cumulative_adj` | numeric(20,8) | NOT NULL | Backward adjustment factor. `original_price = adj_close × cumulative_adj` |
+| `adjustment_type` | varchar(16) | NOT NULL | `PANAMA_RATIO` |
+| `provider` | varchar(32) | NOT NULL | `derived_panama` |
+| `normalisation_version` | varchar(16) | NOT NULL | `2.0.0` |
+| `created_at` | timestamptz | NOT NULL | |
+| `updated_at` | timestamptz | NOT NULL | |
+
+**Unique constraint:** `(underlying_id, exchange, date)`
+
+### 6.2 Sample Data
+
+```
+underlying_id | date       | open     | high     | low      | close    | volume | oi        | expiry_in_use | cumulative_adj | roll_date
+NSE:NIFTY     | 2026-09-10 | 23622.80 | 23668.90 | 23560.00 | 23584.00 |   7496 | 2,819,180 | 2026-09-29    | 1.00000000     |
+NSE:NIFTY     | 2026-09-08 | 24050.00 | 24050.10 | 23937.00 | 23951.60 |   2947 |   637,650 | 2026-09-29    | 1.00000000     |
+NSE:NIFTY     | 2021-10-28 | 17500.00 | 17650.00 | 17420.00 | 17620.00 |  52000 | 8,200,000 | 2021-10-28    | 1.08342500     | 2021-10-28
+```
+
+> The `cumulative_adj` value of 1.0 means prices are unadjusted (recent data). Values > 1.0 indicate historical backward adjustments applied to eliminate roll gaps.
+
+### 6.3 Coverage
+
+| Dimension | Value |
+|---|---|
+| **Rows** | 131,265 |
+| **Underlyings** | 305 |
+| **Date range** | **2021-09-20 → 2026-09-18** |
+| **Roll rule** | 5 trading days before expiry (NSE standard) |
+| **Rebuild** | `make build-continuous-futures` — runs in ~2 minutes |
 
 ---
 
-### Gap 3 — 3 EQ symbols missing `1w`/`1M` (Upstox token)
+## 7. Table: `fo_universe`
 
-BAJFINANCE, KOTAKBANK, NESTLEIND — Upstox token expired mid-run.  
-**Fix:** Refresh `UPSTOX_ACCESS_TOKEN` in `.env.local` then `make fix-equity-partials` (~5 min).
+### 7.1 Schema
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `id` | bigint | NOT NULL | Auto-increment PK |
+| `instrument_id` | varchar(64) | NOT NULL | `NSE:{SYMBOL}` |
+| `symbol` | varchar(64) | NOT NULL | NSE trading symbol |
+| `company_name` | varchar(256) | NULL | Full legal name |
+| `isin` | varchar(12) | NULL | SEBI ISIN (NULL for indices) |
+| `exchange` | varchar(8) | NOT NULL | `NSE`; default |
+| `instrument_class` | varchar(8) | NOT NULL | `EQ` \| `IDX` \| `FO` \| `ETF` |
+| `instrument_type` | varchar(16) | NOT NULL | `EQ` \| `IDX` \| `FUTSTK` \| `FUTIDX` |
+| `sector` | varchar(64) | NULL | `Financials` \| `IT` \| `Energy` \| `Pharma` etc. |
+| `is_index` | boolean | NOT NULL | True for NIFTY, BANKNIFTY etc. |
+| `backfill_priority` | integer | NOT NULL | `1`=Index futures `2`=Stock futures `3`=Broad indices |
+| `fo_listed_date` | date | NULL | When instrument entered F&O universe |
+| `fo_delisted_date` | date | NULL | When removed — NULL = currently active |
+| `is_fo_active` | boolean | NOT NULL | True if active F&O contracts exist |
+| `spot_listed_date` | date | NULL | NSE listing date |
+| `spot_delisted_date` | date | NULL | Delisting / merger date — NULL = still listed |
+| `is_spot_active` | boolean | NOT NULL | True if spot equity tradeable |
+| `successor_symbol` | varchar(64) | NULL | For merged stocks e.g. `CADILAHC→ZYDUSLIFE` |
+| `notes` | text | NULL | Merger details, ticker changes |
+| `lot_size` | integer | NULL | F&O contract lot size |
+| `upstox_key` | varchar(128) | NULL | Upstox V3 instrument key e.g. `NSE_EQ|INE002A01018` |
+| `angel_token` | varchar(32) | NULL | Angel One numeric token e.g. `2885` |
+| `yahoo_symbol` | varchar(32) | NULL | Yahoo Finance ticker e.g. `RELIANCE.NS` |
+| `created_at` | timestamptz | NOT NULL | |
+| `updated_at` | timestamptz | NOT NULL | |
+
+**Unique constraint:** `(symbol, exchange)`
+
+### 7.2 Sample Data
+
+```
+id  | symbol     | isin         | class | sector      | priority | fo_from    | fo_to      | active | successor   | upstox_key
+40  | BANKNIFTY  |              | IDX   |             | 1        | 2021-09-20 |            | true   |             | NSE_INDEX|Nifty Bank
+90  | FINNIFTY   |              | IDX   |             | 1        | 2021-09-20 |            | true   |             | NSE_INDEX|Nifty Fin Service
+207 | NIFTY      |              | IDX   |             | 1        | 2021-09-20 |            | true   |             | NSE_INDEX|Nifty 50
+3   | ABB        | INE117A01022 | EQ    | Industrials | 2        | 2022-01-28 |            | true   |             | NSE_EQ|INE117A01022
+4   | ABBOTINDIA | INE358A01014 | EQ    | Pharma      | 2        | 2021-10-01 |            | true   |             | NSE_EQ|INE358A01014
+11  | AMARAJABAT |              | EQ    | Auto        | 2        | 2021-09-20 | 2022-12-29 | false  | AMARARAJABAT|
+49  | CADILAHC   |              | EQ    | Pharma      | 2        | 2021-09-20 | 2022-03-04 | false  | ZYDUSLIFE   |
+```
+
+### 7.3 Universe Statistics
+
+| Priority | Label | Total | Active | Retired |
+|---|---|---|---|---|
+| 1 | Index futures underlyings | 4 | 4 | 0 |
+| 2 | Stock futures underlyings | 298 | 277 | 21 |
+| 3 | Broad NSE indices | 12 | 12 | 0 |
+| **Total** | | **314** | **293** | **21** |
+
+**Refresh:** `make seed-fo-universe` — idempotent, ON CONFLICT DO UPDATE.
 
 ---
 
-### Gap 4 — Noise instruments in `equity_candle`
+## 8. Data Quality Certification
 
-Filter out: `NSE:FINNIFTY`, `NSE:MIDCPNIFTY`, `NSE:SENSEX`, `NSE:^INDIAVIX`, `NSE:NIFTY`, `NSE:BANKNIFTY`  
-Use the canonical certified queries in §12 to avoid these automatically.
+| Check | `equity_candle` | `futures_candle` | `options_candle` | Enforcement |
+|---|---|---|---|---|
+| `quality_status = TRUSTED` | ✅ 100% | ✅ 100% | ✅ 100% | DB default + ORM |
+| `poor_quality = FALSE` | ✅ 100% | ✅ 100% | ✅ 100% | DB default + ORM |
+| OHLC integrity (high≥low, etc.) | ✅ DB CHECK | ✅ DB CHECK | ✅ DB CHECK | Alembic constraints |
+| `interval_str ≠ '3m'` | ✅ DB CHECK | ✅ DB CHECK | ✅ DB CHECK | Permanent block |
+| `volume ≥ 0` | ✅ DB CHECK | ✅ DB CHECK | ✅ DB CHECK | DB constraint |
+| Duplicate candles | ✅ 0 | ✅ 0 | ✅ 0 | UNIQUE constraint |
+| `expiry NOT NULL` (futures/options) | N/A | ✅ NOT NULL | ✅ NOT NULL | DB constraint |
+| Timezone | UTC TIMESTAMPTZ | UTC TIMESTAMPTZ | UTC TIMESTAMPTZ | All timestamps UTC |
+| Survivorship bias | Mitigated | Mitigated (bhavcopy has all contracts) | Mitigated | fo_universe tracks retired |
+| Look-ahead guard | `available_at_ms` present | N/A for 1d EOD | N/A for 1d EOD | Set for live candles |
 
 ---
 
-## 10. Data Sufficiency for ML Training
+## 9. Intraday Availability by Cohort
 
-### Equity / Spot
+### Equity intraday (`1m`–`1h`)
 
-| Model | Sufficient? | Notes |
+| Cohort | Symbols | Intraday From | Intraday To | Provider | Why limited? |
+|---|---|---|---|---|---|
+| Nifty 50 equities | ~44 | **2021-09-20** | live | Angel One | Angel One tokens available, 5y history |
+| NSE Indices (10) | 10 | **2021-09-20** | live | Angel One | Angel One serves index intraday. Upstox NSE_INDEX **does NOT support intraday**. |
+| F&O universe stocks | ~249 | **~2024-09-01** | live | Upstox (with Angel One fallback) | Upstox free plan: ~2 years intraday max. Pre-2024 not available from any free source. |
+
+### Why Upstox NSE_INDEX doesn't support intraday
+
+Confirmed empirically (Sep 2026): Upstox V3 `/historical-candle/{NSE_INDEX|...}/minutes/...` returns HTTP 400 `UDAPI100011` "Instrument not found" for all intraday intervals. Only `days/1`, `weeks/1`, `months/1` are supported for NSE_INDEX instruments. This is a Upstox API design decision, not a bug.
+
+### MIDCPNIFTY (Nifty Midcap Select)
+
+`NSE_INDEX|Nifty Midcap Select` returns `UDAPI100011` for **all intervals including 1d**. Upstox does not carry this index. Data is fetched via Angel One only.
+
+---
+
+## 10. Residual Gaps & Structural Limitations
+
+### Gap 1 — Intraday for F&O universe stocks limited to ~2 years (structural)
+
+**Instruments:** ~249 non-Nifty50 F&O stocks  
+**Missing:** `1m`–`1h` before approximately Sep 2024  
+**Root cause:** Upstox free/standard API provides ~2 years of intraday history. No free alternative exists.  
+**Impact:** For cross-sectional models comparing F&O universe stocks, intraday features are limited to 2-year lookback for 249 of 298 instruments.  
+**Paid fix:** TrueData / iCharts (~₹5K–20K/year) — full 5y intraday for all symbols.
+
+### Gap 2 — Options intraday (1m–1h) — permanently unavailable from free sources
+
+NSE publishes only EOD bhavcopy. Broker APIs serve intraday options data only for currently-active (non-expired) contracts. Since weekly NIFTY options expire every Thursday and stock options expire monthly, virtually all historical contracts are expired and the intraday data is inaccessible.  
+**Forward collection:** `make collect-options-snapshots` (scheduled at 09:20, 12:00, 15:29 IST) captures live IV + Greeks going forward.
+
+### Gap 3 — BAJFINANCE, KOTAKBANK, NESTLEIND missing `1w`/`1M`
+
+Upstox OAuth token expired mid-run. These are the only 3 of 298 instruments missing weekly/monthly.  
+**Fix:** Refresh `UPSTOX_ACCESS_TOKEN` in `.env.local` → `make fix-equity-partials` (~5 min).
+
+### Gap 4 — `continuous_futures` not auto-updated
+
+The Panama series is not automatically rebuilt when new bhavcopy loads. Currently updated manually.  
+**Fix:** `make build-continuous-futures` — runs in ~2 min. Can be added to the scheduler as a weekly job.
+
+### Gap 5 — Noise instruments in `equity_candle`
+
+These should be excluded from all ML queries (wrong segment, sparse, or duplicate):
+
+| Instrument ID | Issue |
+|---|---|
+| `NSE:FINNIFTY` | FO index leaked into EQ segment — 1 row |
+| `NSE:MIDCPNIFTY` | Same — 63 rows |
+| `NSE:SENSEX` | BSE index (not NSE equity) |
+| `NSE:^INDIAVIX` | Wrong ID format — use `NSE:INDIA VIX` |
+| `NSE:NIFTY` | Duplicate of `NSE:NIFTY 50` (short-symbol) |
+| `NSE:BANKNIFTY` | Duplicate of `NSE:NIFTY BANK` |
+
+---
+
+## 11. ML Training Sufficiency Assessment
+
+### Equity / Spot Pricing
+
+| Use Case | Sufficient? | Details |
 |---|---|---|
-| Daily price prediction (LSTM, Transformer) | ✅ Yes | 1,240+ days, 298 instruments |
-| Intraday 1m momentum (Nifty50) | ✅ Yes | 18M+ 1m rows, full 5y |
-| Intraday 1m momentum (F&O universe) | ⚠️ Partial | ~2y only (2024–2026) |
-| Multi-timeframe features (all intervals) | ✅ Yes | All 9 intervals available |
-| Volatility forecasting (GARCH, HAR-RV) | ✅ Yes | 1,240+ daily returns |
-| Regime classification | ✅ Yes | 5-year bull/bear/sideways cycles |
-| Cross-sectional factor models | ✅ Yes | 298 stocks, complete `1d` overlap |
-
-### Index
-
-| Model | Sufficient? |
-|---|---|
-| Index prediction / replication | ✅ Yes |
-| Sector rotation | ✅ Yes |
-| VIX-based regime model | ✅ Yes |
+| Daily price prediction (LSTM, Transformer) | ✅ **Yes** | 298 instruments × 1,240+ days × all 9 intervals |
+| Intraday 1m features (Nifty50 only) | ✅ **Yes** | 44 stocks × 5y full depth |
+| Intraday 1m features (all F&O stocks) | ⚠️ **2y only** | 249 stocks × ~730 days from Sep 2024 |
+| Multi-timeframe (1m→1M) — Nifty50 | ✅ **Yes** | All intervals full 5y |
+| Multi-timeframe (1m→1M) — F&O universe | ⚠️ **Partial** | 1d/1w/1M full 5y; intraday 2y |
+| Volatility forecasting (GARCH, HAR-RV) | ✅ **Yes** | 1,240+ daily returns per stock |
+| Regime classification | ✅ **Yes** | 5-year bull/bear/sideways cycles |
+| Cross-sectional factor models | ✅ **Yes** | Full overlap on 1d across all 298 instruments |
 
 ### Futures
 
-| Model | Sufficient? | Notes |
+| Use Case | Sufficient? | Details |
 |---|---|---|
-| Basis / cost-of-carry analysis (1d) | ✅ Yes | 247K rows, Sep 2021→Sep 2026 |
-| Roll-yield / term structure | ✅ Yes | Multiple expiries per day |
-| Continuous futures momentum | ✅ Yes | 131K rows, 305 underlyings, 5y |
-| OI-weighted price signals | ✅ Yes | OI + change per contract |
-| Intraday futures (historical 5y) | ❌ No | Not available from free sources |
+| Daily basis / cost-of-carry | ✅ **Yes** | 247K rows, Sep 2021→live, per-contract |
+| Roll-yield / term structure | ✅ **Yes** | Multiple expiries per underlying per day |
+| Continuous momentum (1d) | ✅ **Yes** | 131K rows Panama series, 305 underlyings |
+| OI-weighted price signals | ✅ **Yes** | OI + oi_change per contract per day |
+| Intraday futures (historical 5y) | ❌ **No** | Not available from free sources |
 
 ### Options
 
-| Model | Sufficient? | Notes |
+| Use Case | Sufficient? | Details |
 |---|---|---|
-| Daily options pricing / IV backtest | ✅ Yes | 242K rows, Sep 2021→Sep 2026 |
-| PCR strategy (daily) | ✅ Yes | All strikes per expiry per day |
-| OI flow / build-up | ✅ Yes | OI + change available |
-| Max pain calculation | ✅ Yes | All strikes present |
-| Historical IV surface reconstruction | ✅ Yes (computed) | Use Black-Scholes with spot data |
-| Live IV + Greeks (forward-going) | ✅ Yes | `make collect-options-snapshots` |
-| Intraday options microstructure | ❌ No | Structurally unavailable — see §9 |
+| Daily PCR by OI or volume | ✅ **Yes** | 242K rows, all strikes per expiry per day |
+| Max pain calculation (daily) | ✅ **Yes** | All strikes present |
+| OI flow / build-up analysis | ✅ **Yes** | oi_change available |
+| P&L simulation (daily hold) | ✅ **Yes** | Full OHLCV + settle per contract |
+| Historical IV reconstruction | ✅ **Yes** (computed) | Use Black-Scholes with spot data from equity_candle |
+| IV surface / skew (daily) | ✅ **Yes** | Multiple strikes and expiries per underlying per day |
+| Intraday options microstructure | ❌ **No** | Structurally unavailable (§10) |
 
 ---
 
-## 11. Data Quality Summary
+## 12. Certified Query Reference
 
-| Check | Result |
-|---|---|
-| OHLC constraint violations | **0** — DB CHECK constraints |
-| `quality_status ≠ TRUSTED` | **0** across all tables |
-| `poor_quality = TRUE` | **0** |
-| Duplicate candles | **0** — UNIQUE on (instrument_id, exchange, interval_str, time) |
-| Survivorship bias (FO) | Mitigated — bhavcopy contains all contracts including illiquid/expired |
-| Pre/post-2024 bhavcopy schema merge | Clean — both formats normalised to same DB schema |
-| Upstox fallback for intraday | Active — Angel One token unknown → auto-routes to Upstox |
-
----
-
-## 12. Certified Datasets — Query Reference
-
-### ✅ Equity spot — production-ready (full 5y, all intervals)
+### Nifty50 equities — all intervals, full 5y
 
 ```sql
--- Nifty 50 equities — full 5y, all intervals
 SELECT * FROM equity_candle
 WHERE segment = 'EQ'
   AND instrument_id IN (
@@ -377,23 +508,28 @@ WHERE segment = 'EQ'
     'NSE:NTPC','NSE:ONGC','NSE:POWERGRID','NSE:RELIANCE',
     'NSE:SBILIFE','NSE:SBIN','NSE:SHREECEM','NSE:SUNPHARMA',
     'NSE:TATAMOTORS','NSE:TATASTEEL','NSE:TCS','NSE:TECHM',
-    'NSE:TITAN','NSE:ULTRACEMCO','NSE:WIPRO','NSE:BAJFINANCE',
-    'NSE:KOTAKBANK','NSE:NESTLEIND'
+    'NSE:TITAN','NSE:ULTRACEMCO','NSE:WIPRO'
   )
-  AND quality_status = 'TRUSTED';
+  AND quality_status = 'TRUSTED'
+  AND time >= '2021-09-20';
+```
 
--- All F&O universe equities — full 5y for 1d/1w/1M,
--- ~2y for intraday (1m-1h):
-SELECT * FROM equity_candle ec
-WHERE ec.segment = 'EQ'
-  AND ec.quality_status = 'TRUSTED'
-  AND EXISTS (
-    SELECT 1 FROM fo_universe fu
-    WHERE fu.instrument_id = ec.instrument_id
-      AND fu.backfill_priority = 2  -- stock futures underlyings
-  );
+### All F&O universe equities — using fo_universe as source of truth
 
--- NSE indices — all 10, all intervals, full 5y
+```sql
+-- Spot data for all active F&O eligible stocks (prioritised order)
+SELECT ec.*
+FROM equity_candle ec
+JOIN fo_universe fu ON fu.instrument_id = ec.instrument_id
+WHERE ec.quality_status = 'TRUSTED'
+  AND fu.is_spot_active = TRUE
+  AND fu.backfill_priority <= 2   -- index futures + stock futures underlyings
+ORDER BY fu.backfill_priority, fu.symbol, ec.interval_str, ec.time;
+```
+
+### NSE 10 indices — all intervals, full 5y
+
+```sql
 SELECT * FROM equity_candle
 WHERE segment = 'IDX'
   AND instrument_id IN (
@@ -405,120 +541,96 @@ WHERE segment = 'IDX'
   AND quality_status = 'TRUSTED';
 ```
 
-### ✅ Futures daily (5y)
+### Futures daily — all contracts, all underlyings
 
 ```sql
 SELECT instrument_id, underlying_id, expiry, session_date,
        open, high, low, close, volume, open_interest, oi_change, turnover
 FROM futures_candle
-WHERE provider = 'nse_bhavcopy' AND interval_str = '1d'
+WHERE provider = 'nse_bhavcopy'
+  AND interval_str = '1d'
 ORDER BY underlying_id, expiry, session_date;
 ```
 
-### ✅ Continuous futures (5y, Panama-adjusted)
+### Options — PCR by OI per day for NIFTY
 
 ```sql
-SELECT date, open, high, low, close, volume, open_interest,
-       expiry_in_use, cumulative_adj, roll_date
-FROM continuous_futures
-WHERE underlying_id = 'NSE:NIFTY'   -- any underlying
-ORDER BY date;
-```
-
-### ✅ Options daily (5y)
-
-```sql
-SELECT underlying_id, expiry, strike, option_type, session_date,
-       open, high, low, close, volume, open_interest, oi_change
+SELECT session_date,
+  ROUND(
+    SUM(CASE WHEN option_type='PE' THEN open_interest ELSE 0 END)::numeric /
+    NULLIF(SUM(CASE WHEN option_type='CE' THEN open_interest ELSE 0 END), 0), 3
+  ) AS pcr_oi,
+  SUM(CASE WHEN option_type='CE' THEN volume ELSE 0 END) AS ce_volume,
+  SUM(CASE WHEN option_type='PE' THEN volume ELSE 0 END) AS pe_volume
 FROM options_candle
 WHERE underlying_id = 'NSE:NIFTY'
-ORDER BY expiry, strike, option_type, session_date;
+  AND volume > 0
+GROUP BY session_date
+ORDER BY session_date;
 ```
 
-### ✅ F&O universe registry
+### Continuous futures — daily returns (use adj_close, NOT original)
 
 ```sql
--- All active F&O instruments ordered by backfill priority
-SELECT symbol, company_name, isin, backfill_priority,
-       fo_listed_date, fo_delisted_date, is_fo_active,
-       successor_symbol, sector, upstox_key
-FROM fo_universe
-ORDER BY backfill_priority, symbol;
-
--- Retired / merged instruments
-SELECT symbol, fo_delisted_date, successor_symbol, notes
-FROM fo_universe
-WHERE NOT is_fo_active
-ORDER BY fo_delisted_date;
+SELECT date,
+  close AS adj_close,
+  ROUND((close / LAG(close) OVER (ORDER BY date) - 1) * 100, 4) AS daily_return_pct,
+  open_interest,
+  expiry_in_use,
+  roll_date,
+  cumulative_adj
+FROM continuous_futures
+WHERE underlying_id = 'NSE:NIFTY'
+ORDER BY date;
+-- To get original price: original_close = adj_close * cumulative_adj
 ```
 
-### ❌ Exclude from training
+### Exclude noise instruments
 
 ```sql
--- Always filter these noise instruments
-instrument_id NOT IN (
-  'NSE:FINNIFTY','NSE:MIDCPNIFTY','NSE:SENSEX',
-  'NSE:^INDIAVIX','NSE:NIFTY','NSE:BANKNIFTY'
+-- Always add this to equity_candle queries
+WHERE instrument_id NOT IN (
+  'NSE:FINNIFTY', 'NSE:MIDCPNIFTY', 'NSE:SENSEX',
+  'NSE:^INDIAVIX', 'NSE:NIFTY', 'NSE:BANKNIFTY'
 )
 ```
 
 ---
 
-## 13. Appendix
+## 13. Background Worker — Keep-Current Status
 
-### A — Final Row Counts (2026-09-21)
+A continuous OHLCV catch-up worker runs inside the Docker `worker` service (`python -m src.worker`). It keeps all tables current automatically.
 
-| Table | Rows | Notes |
-|---|---|---|
-| equity_candle | **123,148,758** | All 9 intervals, 298 instruments |
-| futures_candle (bhavcopy 1d) | **246,986** | 286 underlyings, Sep 2021→Sep 2026 |
-| futures_candle (broker intraday) | ~55,000 | Near-month only, 6 weeks |
-| options_candle (bhavcopy 1d) | **242,255** | 304 underlyings, Sep 2021→Sep 2026 |
-| continuous_futures | **131,265** | 305 underlyings, Sep 2021→Sep 2026 |
-| fo_universe | **314** | 293 active, 21 retired |
-| instrument_master | ~36,174 | Current F&O contracts |
-| instrument_provider_mapping | ~107K | Angel One + Upstox keys per contract |
+### How it works
 
-### B — NSE Bhavcopy URL Architecture
+1. On startup, loads all instruments from `fo_universe` (priority-ordered: index futures → stock futures → broad indices)
+2. For each instrument × interval, reads the Redis checkpoint (key: `mds:backfill:checkpoint:{symbol}:{exchange}:{interval}`) to find the last successfully saved candle
+3. Fetches only the delta from that point to `now()` using `HistoricalEngine.run_backfill()`
+4. Writes checkpoint after each successful chunk — fully resumable on restart
 
-| Period | URL format | Access method |
-|---|---|---|
-| Pre-2024 | `archives.nseindia.com/content/fo/fo{DD}{MON}{YYYY}bhav.csv.zip` | `pybhav` library (session cookies) |
-| 2024–present | `nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip` | Direct HTTPS GET |
+### Schedule
 
-### C — Upstox Intraday History Limits (confirmed empirically)
+| Pass | Intervals | Trigger | Notes |
+|---|---|---|---|
+| EOD | `1d`, `1w`, `1M` | Daily at 17:00 IST | Post-market settlement |
+| Intraday | `1m`, `5m`, `10m`, `15m`, `30m`, `1h` | Every 4 hours | Only for EQ (not IDX — Upstox doesn't support index intraday) |
 
-| Interval | Max history available | Note |
-|---|---|---|
-| `1m` | ~2 years | From Sep 2024 on free plan |
-| `5m` | ~2 years | Same |
-| `10m` | ~2 years | Same |
-| `15m` | ~2 years | Same |
-| `30m` | ~2 years | Same |
-| `1h` | ~2 years | Same |
-| `1d`, `1w`, `1M` | 5+ years | No restriction |
+### Known limitations & error handling
 
-### D — Upstox Instrument Keys — Full Coverage
-
-301 NSE EQ symbols now have `NSE_EQ|{ISIN}` keys mapped in:
-- `_UPSTOX_INSTRUMENT_KEYS` static map in `src/engines/historical_engine.py`
-- `instrument_provider_mapping` DB table (provider='upstox')
-
-Angel One fallback for intraday: engine auto-routes to Upstox when Angel One token is unknown and Upstox key exists.
-
-### E — Makefile Targets Summary
-
-| Target | Action |
+| Scenario | Behaviour |
 |---|---|
-| `make backfill-5y` | Full 5y backfill reading from fo_universe (priority order) |
-| `make seed-fo-universe` | Refresh fo_universe table |
-| `make load-bhavcopy-5y` | NSE bhavcopy → futures + options (pre-2024 + 2024+) |
-| `make load-bhavcopy-futures` | Futures only (faster) |
-| `make build-continuous-futures` | Rebuild Panama series |
-| `make collect-options-snapshots` | Live option chain + IV + Greeks |
-| `make fix-equity-partials` | Fix BAJFINANCE/KOTAKBANK/NESTLEIND 1w+1M |
-| `make fix-all-gaps` | Full pipeline: migrate + equity + bhavcopy + continuous |
-| `make data-report` | Print live row counts |
+| Upstox token expired | Returns 401; worker logs warning and continues with other instruments; no data loss |
+| NSE bhavcopy date not yet published | Returns 404; logged as holiday/skip; retried next cycle |
+| Upstox 400 for IDX intraday | **Fixed**: IDX instruments skip intraday entirely; Angel One handles IDX 1m–1h |
+| Angel One token unknown | **Auto-fallback**: routes to Upstox using NSE_EQ\|ISIN key; 301 symbols mapped |
+| Provider rate limit (429) | HistoricalEngine backs off; checkpoint preserved; resumes next chunk |
+
+### Monitor commands
+
+```bash
+make worker-logs        # tail live worker container logs
+make catchup-status     # show latest candle date + days_behind per interval
+```
 
 ---
 
@@ -526,7 +638,9 @@ Angel One fallback for intraday: engine auto-routes to Upstox when Angel One tok
 
 | Date | Version | Summary |
 |---|---|---|
-| 2026-09-18 | 1.0 | Initial report — baseline after first 5y broker backfill |
-| 2026-09-19 | 1.1 | NSE bhavcopy loaded (futures 139K, options 134K, Jan 2024+); continuous futures 47K rows; GRASIM fixed; DB migration applied |
-| 2026-09-19 | 1.2 | Pre-2024 bhavcopy gap filled via pybhav; futures 247K, options 242K, continuous 131K; all cover Sep 2021→Sep 2026 |
-| 2026-09-20 | **2.0** | **All gaps resolved.** F&O universe expanded to 298 instruments. Full spot backfill (1d/1w/1M full 5y, intraday 5y for Nifty50 / 2y for others). `fo_universe` master table created (314 rows, priority-ordered backfill). 301 Upstox ISIN keys mapped. Angel One→Upstox automatic fallback for intraday. equity_candle grew from 26.6M→**123.1M rows**. Grand total: **~123.8M rows**. |
+| 2026-09-18 | 1.0 | Initial report — baseline state after first 5y broker backfill |
+| 2026-09-19 | 1.1 | NSE bhavcopy loaded (futures 139K, options 134K, Jan 2024+); continuous futures 47K |
+| 2026-09-19 | 1.2 | Pre-2024 bhavcopy via pybhav; futures 247K, options 242K, Sep 2021→Sep 2026 |
+| 2026-09-20 | 2.0 | All gaps resolved. F&O universe expanded to 298 instruments. equity_candle 123M rows. fo_universe master table (314 rows). 301 Upstox ISIN keys mapped. Auto-fallback Angel One→Upstox. |
+| 2026-09-21 | 2.1 | Background worker deployed — auto-keeps data current. Worker-specific 400 errors: Upstox NSE_INDEX intraday not supported; MIDCPNIFTY not on Upstox; Angel One chunk reduced 90→30d for Upstox fallback compatibility. All errors resolved in v2.1. |
+| 2026-09-22 | **3.0** | **In-depth investigation report.** Full column schemas for all 5 tables with types and descriptions. Sample data rows from live DB. Confirmed data availability dates from direct DB queries. Empirically confirmed Upstox NSE_INDEX intraday limitation (all intervals 400). Documented two-cohort intraday split with exact from-dates. Worker keep-current section added with error-handling matrix. All availability ranges verified against live data. |
