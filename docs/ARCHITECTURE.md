@@ -1,7 +1,7 @@
 # DATA-SERVICE 2.0 — Architecture Reference
 
-> **Version:** 2.1.0 · **Port:** 8200 · **Language:** Python 3.11+  
-> Last updated: 2026-09-17 (pipeline gap fixes + Upstox V3 migration)
+> **Version:** 2.2.0 · **Port:** 8200 · **Language:** Python 3.11+  
+> Last updated: 2026-09-22 (v2.2.0 — 5y backfill, fo_universe, OHLCV catch-up worker, NSE_INDEX routing fix)
 
 ---
 
@@ -133,6 +133,7 @@ data-service2.0/
 │   │   ├── timescale.py         TimescaleDB detection + hypertable status logging
 │   │   └── models/              ORM models — equity_candle, futures_candle,
 │   │                            options_candle, market_tick, market_quote,
+│   │                            continuous_futures (new v2.2.0), fo_universe (new v2.2.0),
 │   │                            exchange_calendar, instrument_provider_mapping, …
 │   │
 │   ├── engines/                 Core business logic engines
@@ -196,6 +197,7 @@ data-service2.0/
 │   │
 │   ├── scheduler_jobs/          Individual cron job implementations
 │   └── worker_tasks/            Individual worker task implementations
+│       ├── ohlcv_catchup.py     Continuous OHLCV catch-up — startup + EOD 17:00 IST + intraday 4h
 │       ├── stores/
 │       │   └── lineage_store.py     ProvenanceRecord persistence
 │       └── forensics/
@@ -220,10 +222,28 @@ data-service2.0/
 │   ├── test_deribit_live.py     Live Deribit connectivity test
 │   ├── test_provider_auth.py    All provider auth validation
 │   ├── test_api_curl.sh         Full API smoke test (curl-based)
-│   ├── load_fno_instrument_master.py  Loads 34K+ F&O contracts into instrument_master
+│   ├── load_fno_instrument_master.py  Loads 34K+ F&O contracts + 35,940 Upstox NSE_FO keys
 │   ├── load_fno_universe.py     Populates fno_universe_membership (238 active rows)
-│   ├── populate_exchange_calendar.py  Loads NSE/NFO calendar (2024–2028, 3 654 rows)
-│   └── backfill_india_1y.py     1-year NSE historical candle backfill (EQ/IDX/FO)
+│   ├── populate_exchange_calendar.py  Loads NSE/NFO calendar (2024–2028, 3,654 rows)
+│   ├── backfill_india_1y.py     1-year NSE historical candle backfill (EQ/IDX only)
+│   ├── backfill_india_5y.py     5-year OHLCV backfill (ALL_SPOT via fo_universe + fallback)
+│   ├── load_fo_bhavcopy_5y.py   NSE F&O bhavcopy daily loader → futures_candle + options_candle
+│   ├── load_continuous_futures.py  Front-month roll → continuous_futures table
+│   ├── seed_fo_universe.py      Seed fo_universe master table (314 rows)
+│   ├── load_options_chain_snapshots.py  Load per-strike CE/PE option chain snapshots
+│   ├── _live_verify.py          Comprehensive live runtime verification
+│   ├── _cred_check.py           Credential validation helper
+│   ├── _check_oauth.py          Upstox OAuth token status checker
+│   ├── _rl_load_test.py         Rate-limit load test
+│   ├── _test_survivorship.py    Survivorship bias constraint tests
+│   ├── _test_tick_persistence.py  Tick persistence pipeline test
+│   ├── _test_upstox_ws.py       Upstox WebSocket live decode test
+│   ├── _redis_token_sharing.py  Multi-worker Redis token sharing test
+│   ├── _verify_refresh_lock.py  Distributed refresh lock test
+│   ├── deploy.sh                Core deploy logic (build → rolling restart → health check)
+│   ├── webhook_server.py        HTTP webhook receiver (GitHub / GitLab / generic)
+│   ├── setup-autodeploy.sh      Auto-deploy management CLI
+│   └── post-push.hook           Git hook that fires on every `git push`
 │
 ├── docker/postgres/init/        PostgreSQL init scripts (TimescaleDB extension)
 ├── docs/                        Technical documentation
@@ -240,11 +260,11 @@ data-service2.0/
 
 | Service | Image | Port | Role |
 |---|---|---|---|
-| `api` | `data-service:2.0.0` | 8200 | FastAPI + Uvicorn (4 workers), REST + WebSocket |
-| `worker` | `data-service:2.0.0` | — | Backfill, gap recovery, reconciliation, provenance retries |
-| `scheduler` | `data-service:2.0.0` | — | APScheduler cron jobs (F&O refresh, JWT rotation, NTP monitor) |
-| `redis` | `redis:7-alpine` | 6379 (internal) | L2 cache, Event Bus (Streams), circuit-breaker state, rate-limiter state |
-| `postgres` | `timescale/timescaledb:latest-pg15` | 5444 (host) | L3 persistent store — OHLCV candles, gaps, provenance, instruments |
+| `api` | `data-service:2.2.0` | 8200 | FastAPI + Uvicorn (4 workers), REST + WebSocket |
+| `worker` | `data-service:2.2.0` | — | Continuous OHLCV catch-up (startup + EOD 17:00 IST + intraday 4h), gap recovery, reconciliation |
+| `scheduler` | `data-service:2.2.0` | — | APScheduler cron jobs (F&O refresh 08:45 IST, EOD catch-up 17:00 IST, JWT rotation 23:55 IST, NTP monitor) |
+| `redis` | `redis:7-alpine` | 6379 (internal) | L2 cache, Event Bus (Streams), circuit-breaker state, rate-limiter state, OHLCV checkpoints |
+| `postgres` | `timescale/timescaledb:latest-pg15` | 5444 (host) | L3 persistent store — equity_candle (~123M), futures_candle (246K+), options_candle (242K+), continuous_futures (131K), fo_universe (314), instruments |
 
 All services share the `data-service-net` bridge network. The host only exposes ports 8200 (API) and 5444 (PostgreSQL for local tooling).
 
@@ -359,9 +379,12 @@ Orchestrates all Indian live market data:
 
 Manages OHLCV backfill across all Indian intervals:
 - Chunks requests by `maxChunkDays` per provider (avoids API date-range limits)
-- Primary: Upstox V3 (all 9 intervals now supported — 5m/10m/15m/1h restriction lifted 2026-09-17)
-- Secondary: Angel One SmartAPI (1m: 30-day; 5m/15m: 90-day)
-- Source timestamp, underlying_id, and source_type now written on every candle row (fixed 2026-09-17)
+- Primary: Upstox V3 (all 9 intervals supported — lifted 2026-09-17; EOD-only for NSE_INDEX — fixed 2026-09-22)
+- Secondary: Angel One SmartAPI (1m: 30-day; 5m/15m: 90-day; sole intraday source for NSE_INDEX instruments)
+- **NSE_INDEX intraday routing** (2026-09-22): `_resolve_provider()` routes IDX instruments to Upstox only for EOD intervals (`1d`/`1w`/`1M`). All `1m`–`1h` requests for index instruments use Angel One. `MIDCPNIFTY` unavailable on Upstox at any interval.
+- **Angel One → Upstox auto-fallback**: when `angel_one_token_unknown` fires and the symbol has a registered ISIN key in `_UPSTOX_INSTRUMENT_KEYS` (301 symbols), the engine silently re-routes to Upstox. Logs `angel_one_token_unknown_upstox_fallback`.
+- **301 `NSE_EQ|ISIN` keys**: all 229 NSE F&O universe stocks + NSE index display name aliases mapped.
+- Source timestamp, underlying_id, and source_type written on every candle row
 - Cross-provider reconciliation reports CONFIRMED / MINOR_DIVERGENCE / MAJOR_DIVERGENCE
 
 ### GapRecovery (`src/engines/gap_recovery.py`)
@@ -525,8 +548,8 @@ The v2 schema adds 16 new tables across 6 logical layers, replacing the monolith
 | Table | Purpose |
 |---|---|
 | `equity_candle` | NSE/BSE equities + indices OHLCV (segments: EQ, IDX, ETF). **Primary write target for all NSE historical data.** |
-| `futures_candle` | NSE F&O futures OHLCV + open interest (exchange: NFO/BFO) |
-| `options_candle` | NSE F&O options OHLCV + open interest, with `strike` and `option_type` (CE/PE) |
+| `futures_candle` | NSE F&O futures OHLCV + open interest (exchange: NFO/BFO). Also holds NSE bhavcopy daily rows. |
+| `options_candle` | NSE F&O options OHLCV + open interest, with `strike` and `option_type` (CE/PE). Also holds NSE bhavcopy daily rows. |
 
 All three enforce: no `3m` interval (CHECK constraint), OHLC validity (high≥open, high≥close, low≤open, low≤close), volume≥0. Unique index on `(instrument_id, exchange, interval_str, time)` enables `ON CONFLICT DO NOTHING`.
 
@@ -561,28 +584,38 @@ All three enforce: no `3m` interval (CHECK constraint), OHLC validity (high≥op
 | `ingestion_checkpoint` | Resumable job state — `last_successful_timestamp` per `(provider, dataset, instrument_id, exchange, interval)` |
 | `candle_bar_quarantine` | Rows from `candle_bar` that could not be classified during migration |
 
+#### Layer 7 — F&O Universe + Derived Series (new in v2.2.0)
+
+| Table | Migration | Purpose |
+|---|---|---|
+| `fo_universe` | `20260920_000000` | Master F&O instrument registry — 314 rows (293 active, 21 retired). Columns: `instrument_id`, `symbol`, `company_name`, `isin`, `exchange`, `instrument_class`, `sector`, `is_index`, `backfill_priority`, `fo_listed_date`, `fo_delisted_date`, `is_fo_active`, `spot_listed_date`, `spot_delisted_date`. Used by the OHLCV catch-up worker as the instrument source (FO→IDX→EQ priority order). |
+| `continuous_futures` | `20260919_000000` | Front-month-rolled continuous futures series — 131,265 rows, 305 underlyings, Sep 2021 → Sep 2026. Columns: `symbol`, `date`, `open`, `high`, `low`, `close`, `volume`, `open_interest`, `roll_date`. |
+
 #### `candle_bar` — deprecated archive
 
 `candle_bar` is **retained as a read-only archive** and marked with a deprecation `COMMENT`. It is not dropped and not structurally modified. No production code writes to it. It contains 5,425,725 rows (all NSE data migrated to `equity_candle`; 6 Binance rows tagged `CRYPTO_PENDING`). Scheduled for removal after 2026-10-15.
 
-#### Production data as of 2026-09-15
+#### Production data as of 2026-09-22
 
-| Table | Rows |
-|---|---|
-| `equity_candle` | **5,460,561** (9 intervals: 1m/5m/10m/15m/30m/1h/1d/1w/1M) |
-| `futures_candle` | 20 (live F&O data — NIFTY + RELIANCE Sep FUT) |
-| `market_quote` | 3 (real live quotes: RELIANCE ltp=1240.6, HDFCBANK ltp=714.1 with depth) |
-| `option_greeks_snapshot` | 10 (NIFTY Sep29 options: iv/delta/gamma/theta/vega/oi) |
-| `option_chain_snapshot` | 53 (NIFTY/BANKNIFTY/FINNIFTY snapshots) |
-| `option_chain_contract` | 10 (per-strike CE/PE rows with Greeks) |
-| `instrument_provider_mapping` | 68,915 (Angel One + Upstox tokens) |
-| `exchange_calendar` | 3,654 (NSE/EQ + NFO/FO, 2024–2028) |
-| `fno_universe_membership` | 238 active |
+| Table | Rows | Notes |
+|---|---|---|
+| `equity_candle` | **~123M** | 298 instruments, all 9 intervals; Nifty50: 5y intraday; F&O universe: ~2y intraday |
+| `futures_candle` | **~302K** | 246,986 bhavcopy 1d (Sep 2021→live) + ~55K broker intraday (near-month) |
+| `options_candle` | **242,255** | Bhavcopy 1d, Sep 2021 → live, ~304 underlyings |
+| `continuous_futures` | **131,265** | 305 underlyings, Sep 2021 → Sep 2026 |
+| `fo_universe` | **314** | 293 active, 21 retired |
+| `market_quote` | 3+ | Real live quotes with depth_json |
+| `option_greeks_snapshot` | 10+ | NIFTY Sep options with iv/delta/gamma/theta/vega/oi |
+| `option_chain_snapshot` | 53+ | NIFTY/BANKNIFTY/FINNIFTY snapshots |
+| `option_chain_contract` | 10+ | Per-strike CE/PE rows with Greeks |
+| `instrument_provider_mapping` | **70,629** | 34,505 Angel One + 35,940 Upstox NSE_FO keys (1:1 active) |
+| `exchange_calendar` | 3,654 | NSE/EQ + NFO/FO, 2024–2028 |
+| `fno_universe_membership` | 238 active | Point-in-time F&O eligibility |
 
 ### Migration management
 
 ```bash
-# Apply all pending migrations (current head: b1c2d3e4f5a6)
+# Apply all pending migrations (current head: 20260920_000000)
 docker compose --env-file .env.local exec api alembic upgrade head
 
 # Check current revision
@@ -594,6 +627,16 @@ docker compose --env-file .env.local exec api \
 ```
 
 > **TimescaleDB hypertables** are created automatically by the Alembic migration (`b1c2d3e4f5a6`) using `create_hypertable(..., if_not_exists => TRUE)`. No manual DDL step is needed.
+
+**Migration chain (key revisions in order):**
+
+| Migration | Description |
+|---|---|
+| `b1c2d3e4f5a6` | v2 schema — 16 new tables, TimescaleDB hypertables |
+| `20260917_000000` | `depth_json`/`source_type` on `market_quote`; columns on `option_greeks_snapshot` |
+| `20260918_000000` | `source_timestamp`/`underlying_id` on candle tables; `fc_candle_not_after_expiry` CHECK; `available_at_ms` column |
+| `20260919_000000` | `continuous_futures` table |
+| `20260920_000000` | `fo_universe` table (current HEAD) |
 
 ---
 
@@ -700,13 +743,33 @@ Applied as a router-level FastAPI dependency on every `/v1/*` data route. Accept
 |---|---|---|
 | `fno_universe_refresh` | 08:45 IST daily | Refresh the F&O instrument universe from NSE |
 | `angel_one_jwt_rotation` | 23:55 IST daily | Rotate Angel One JWT before market open; new token stored in Redis |
+| `catchup_eod_job` | 17:00 IST daily | Trigger OHLCVCatchUpWorker EOD pass (1d/1w/1M intervals) |
+| `catchup_intraday_job` | Every `CATCHUP_INTRADAY_INTERVAL` hours (default 4h) | Trigger OHLCVCatchUpWorker intraday pass |
 | `clock_skew_monitor` | Every ≤30 seconds | NTP clock-skew sampling (Requirement 18.8) |
 
-### Worker (`src/worker.py`)
+### Worker (`src/worker.py` + `src/worker_tasks/ohlcv_catchup.py`)
 
-Long-running background process responsible for:
-- OHLCV backfill orchestration (chunked, respects provider `maxChunkDays`)
-- Gap detection and recovery (drives the PENDING→RECOVERING→RECOVERED state machine)
+The worker service now runs the **OHLCVCatchUpWorker** as its primary function:
+
+**Architecture (`src/worker_tasks/ohlcv_catchup.py`)**:
+- Loads instrument universe from `fo_universe` DB table, ordered by priority: Index futures → Stock futures → Indices → Nifty50 → Others. Falls back to static `ALL_SPOT` list if `fo_universe` is not yet populated.
+- Calls `HistoricalEngine.run_backfill()` — same code path as manual backfill scripts. Engine auto-advances `from_ts` to the Redis checkpoint, so only genuinely missing candles are fetched.
+- **EOD pass** — intervals `1d`, `1w`, `1M`; runs once at 17:00 IST and immediately on startup.
+- **Intraday pass** — intervals `1m`–`1h`; runs every `CATCHUP_INTRADAY_INTERVAL` hours (default 4). **Skips NSE_INDEX instruments entirely** — Upstox returns UDAPI100011 for index intraday; these are handled by routing logic in `HistoricalEngine`.
+- Sessions are created and disposed per cycle (stateless pattern — no memory leak across cycles).
+
+**Configuration env vars:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `CATCHUP_EOD_INTERVAL_HOURS` | `24` | Hours between EOD passes |
+| `CATCHUP_INTRADAY_INTERVAL` | `4` | Hours between intraday passes |
+| `CATCHUP_MAX_INSTRUMENTS` | `500` | Max instruments per pass |
+| `CATCHUP_CHUNK_DELAY_S` | `0.5` | Seconds between chunk fetches |
+| `CATCHUP_INSTRUMENT_DELAY_S` | `0.1` | Seconds between instruments |
+
+Additional worker responsibilities (unchanged):
+- Gap detection and recovery (PENDING→RECOVERING→RECOVERED state machine)
 - Cross-provider reconciliation jobs
 - Provenance persistence retries
 - DataIncident archival for EXHAUSTED gaps
@@ -749,6 +812,9 @@ All F&O backfill jobs **must** use `TradingCalendarService` rather than inline w
 | `instrument_master_loaded` | info | InstrumentMasterService loaded from DB into memory |
 | `historical_engine_ready` | info | HistoricalEngine pre-wired with shared adapters |
 | `upstox_adapter_ready` | info | Upstox access token accepted |
+| `ohlcv_catchup_worker_started` | info | OHLCV catch-up worker started; `startup_pass=true` on first run |
+| `ohlcv_catchup_pass_complete` | info | Catch-up pass finished; `instruments_processed`, `candles_fetched` |
+| `angel_one_token_unknown_upstox_fallback` | info | Auto-routed to Upstox because Angel One token not mapped |
 | `api_key_rejected` | warning | Unknown key in X-API-KEY header |
 | `circuit_open` | warning | A provider circuit transitioned to OPEN |
 | `cache_l2_unavailable` | warning | Redis unavailable; falling back to provider |

@@ -4,7 +4,56 @@ All notable changes to DATA-SERVICE 2.0 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 > **Current status:** CONDITIONALLY_READY for production  
-> See [`reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) for the authoritative runtime certification.
+> See [`PRODUCTION_CERTIFICATION_STATUS.md`](PRODUCTION_CERTIFICATION_STATUS.md) for the authoritative runtime certification.
+
+---
+
+## [2.2.0] — 2026-09-22 (5-year backfill campaign + continuous OHLCV catch-up worker)
+
+### Added (data pipeline)
+
+- **`fo_universe` DB table** — ORM model `src/db/models/fo_universe.py`, migration `20260920_000000_add_fo_universe_table.py`. Master F&O instrument registry with columns: `instrument_id`, `symbol`, `company_name`, `isin`, `exchange`, `instrument_class`, `sector`, `is_index`, `backfill_priority`, `fo_listed_date`, `fo_delisted_date`, `is_fo_active`, `spot_listed_date`, `spot_delisted_date`. Seeded with 314 rows (293 active, 21 retired) via `scripts/seed_fo_universe.py`.
+- **`continuous_futures` DB table** — migration `20260919_000000_add_continuous_futures_table.py`. Stores front-month-rolled continuous series; seeded with 131,265 rows (305 underlyings, Sep 2021 → Sep 2026) via `scripts/load_continuous_futures.py`.
+- **5-year backfill script** — `scripts/backfill_india_5y.py`: reads instrument universe from `fo_universe` DB table with FO→IDX→EQ priority order, falls back to static `india_instruments.py`. Supports `ALL_SPOT` / `FO_UNIVERSE` / `EQ_IDX` class filters. Gradual rate-limiting via chunk-delay + instrument-delay. Completed: 123M+ equity candle rows.
+- **NSE F&O bhavcopy loader** — `scripts/load_fo_bhavcopy_5y.py`: daily loader for `futures_candle` + `options_candle` (1d). Dual-path: pre-2024 via `pybhav` library, 2024+ via direct `BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip` URL. Loaded 246,986 futures rows and 242,255 options rows (Sep 2021 → live).
+- **F&O options chain snapshot loader** — `scripts/load_options_chain_snapshots.py`: loads per-strike CE/PE snapshots.
+- **Seed F&O universe script** — `scripts/seed_fo_universe.py`: 647-line seeder that populates `fo_universe` with company names, ISINs, sectors, listing dates, and backfill priority.
+- **Continuous OHLCV catch-up worker** — `src/worker_tasks/ohlcv_catchup.py` (new 484-line module). Background task that automatically fetches all missing candles from the last Redis checkpoint to today, for every instrument × interval pair. Two pass types: EOD pass (`1d`, `1w`, `1M`) runs once daily at 17:00 IST; intraday pass runs every 4 hours. Fires immediately on startup to close any gap accumulated since the last run. Stateless scheduler job pattern — sessions created and disposed per cycle.
+- **301 Upstox `NSE_EQ|ISIN` keys** — `_UPSTOX_INSTRUMENT_KEYS` map in `historical_engine.py` expanded from 51 → 301 symbols. Added all 229 NSE F&O universe stocks with verified ISINs plus all NSE index display name aliases.
+- **Angel One → Upstox automatic fallback** — `_fetch_candles()` in `historical_engine.py`: when `angel_one_token_unknown` fires and the symbol has a registered Upstox ISIN key, the engine silently re-routes to the Upstox path. Logs `angel_one_token_unknown_upstox_fallback` info event.
+- **Full NSE F&O universe instrument list** — `scripts/india_instruments.py` expanded: `FO_UNIVERSE_EQUITIES` (231 EQ + 2 IDX), `NFO_FUTURES` (full index + stock universe), `ALL_SPOT` (all spot backfill targets), `ALL_INSTRUMENTS` (union of all). `ALL_EQ_IDX` alias retained for backward compatibility with 1-year backfill script.
+- **Upstox `NSE_FO|{token}` keys** — `scripts/load_fno_instrument_master.py` updated: `_build_instrument_record()` derives `upstox_key` as `NSE_FO|{angel_token}`. UPSERT uses `COALESCE(EXCLUDED, existing)` to preserve existing keys on conflict. Seeded 35,940 Angel One + 35,940 Upstox mappings (70,629 total provider mapping rows).
+- **Makefile targets** — extensive new targets: `load-fno`, `load-fno-dry`, `backfill-5y`, `seed-fo-universe`, `catchup-status`, `worker-logs`, `data-report`, and all existing infra targets. Auto-detection of env file: `.env.local` → `.env.production` → `.env`.
+
+### Fixed (worker + OHLCV catch-up)
+
+- **NSE_INDEX intraday blocked (UDAPI100011)** — Upstox does not serve `1m–1h` candles for `NSE_INDEX` instruments. `_resolve_provider()` in `historical_engine.py` now routes IDX instruments to Upstox only for EOD intervals (`1d`/`1w`/`1M`); intraday routes to Angel One instead. `ohlcv_catchup._run_pass()` skips intraday intervals for `instrument_class=IDX` entirely, preventing wasted 400 retry cycles.
+- **MIDCPNIFTY not available on Upstox** — Nifty Midcap Select index returns `UDAPI100011` for all intervals including `1d`. Comment added in `_UPSTOX_INSTRUMENT_KEYS` flagging the limitation. Intraday traffic routes to Angel One.
+- **Upstox 90-day single-call window exceeded** — when the Angel One fallback fires, Upstox received the full 90-day window as a single call, exceeding its ~30-day limit for minute-level data. Now chunked correctly in `historical_engine.py`.
+
+### Changed
+
+- **`src/worker.py`** — idle stub replaced by real OHLCV catch-up worker with 5 services: `OHLCVCatchUpWorker` for intraday, `OHLCVEODWorker` for EOD, startup immediate pass, configurable intervals via env vars.
+- **`src/scheduler.py`** — added `catchup_eod_job` (daily at 17:00 IST) and `catchup_intraday_job` (every `CATCHUP_INTRADAY_INTERVAL` hours, default 4h).
+- **`docker-compose.yml`** — added `CATCHUP_*` env vars to `api` and `worker` service env blocks.
+- **`.env.example`** — documents all `CATCHUP_*` configuration variables: `CATCHUP_EOD_INTERVAL_HOURS`, `CATCHUP_INTRADAY_INTERVAL`, `CATCHUP_MAX_INSTRUMENTS`, `CATCHUP_CHUNK_DELAY_S`, `CATCHUP_INSTRUMENT_DELAY_S`.
+- **`Dockerfile`** — added `COPY scripts/` so all Makefile targets work inside containers.
+- **`scripts/backfill_india_1y.py`** — imports `ALL_EQ_IDX` alias instead of `ALL_INSTRUMENTS` to keep 1-year scope to IDX+EQ only (no F&O bleed).
+
+### DB state after 2.2.0
+
+| Table | Rows | Change from 2.1.0 |
+|---|---|---|
+| `equity_candle` | ~123M+ | +117M (5y intraday backfill, 298 instruments) |
+| `futures_candle` (bhavcopy 1d) | 246,986 | +246,986 (new, 5y NSE bhavcopy) |
+| `futures_candle` (broker intraday) | ~55,000 | +55,000 (near-month only) |
+| `options_candle` (bhavcopy 1d) | 242,255 | +242,255 (new, 5y NSE bhavcopy) |
+| `continuous_futures` | 131,265 | +131,265 (new, 5y, 305 underlyings) |
+| `fo_universe` | 314 | +314 (new master registry) |
+
+### Tests
+
+4,821+ unit tests passing (0 failures, 6 external warnings). ML_DATA_CERTIFICATION.md updated to v3.0 with full column schemas, sample data, and empirically confirmed availability dates from live DB queries.
 
 ---
 

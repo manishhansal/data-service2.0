@@ -1,7 +1,7 @@
 # UPSTOX DATA COMPLETENESS REPORT
 ## data-service2.0 — AlphaForge Market Data Platform
 
-**Report Date:** 2026-09-16  
+**Report Date:** 2026-09-16 *(see UPDATE — 2026-09-22 for v2.2.0 changes)*  
 **Provider:** Upstox V2/V3  
 **Audit Type:** Static code analysis + official Upstox API documentation (verified against https://upstox.com/developer/api-documentation)  
 **Live Verification:** Requires credentials — NOT_VERIFIED without live credentials
@@ -276,3 +276,28 @@
 | Live verification | LTP V3 (RELIANCE=1243.9, HDFCBANK=716.35, NIFTY=23240.7), Full Quote V3, Option Chain (128/150/123 rows), Historical V3 all intervals — all confirmed 2026-09-17 |
 
 *Unit tests: 4,413 passing (0 failures) as of 2026-09-17.*
+
+---
+
+## UPDATE — 2026-09-22 (v2.2.0)
+
+| Change | Detail |
+|--------|--------|
+| 301 NSE_EQ\|ISIN keys mapped | `_UPSTOX_INSTRUMENT_KEYS` 51→301; all F&O universe stocks + index aliases; ISIN verified against Upstox instruments API |
+| 35,940 NSE_FO\|{token} keys seeded | `instrument_provider_mapping` now has 70,629 total rows (35,940 Angel One + 35,940 Upstox) |
+| NSE_INDEX intraday BLOCKED (UDAPI100011) | `_resolve_provider()` routes IDX to Upstox only for 1d/1w/1M; intraday falls back to Angel One (2026-09-22 fix) |
+| MIDCPNIFTY unavailable on Upstox | Returns UDAPI100011 at all intervals including 1d; comment added in `_UPSTOX_INSTRUMENT_KEYS` |
+| 5y historical data complete | ~123M equity rows; 246,986 futures bhavcopy rows; 242,255 options bhavcopy rows |
+| OHLCV catch-up worker uses Upstox for EOD | `ohlcv_catchup._run_pass()` calls Upstox V3 for 1d/1w/1M; skips intraday for IDX instruments entirely |
+| Upstox `fetch_full_quote` → V3 | Confirmed — migrated from V2 April 2025; V3 adds CAS fields. Known limitation on V2 full quotes is resolved. |
+
+**Updated Known Limitations (v2.2.0):**
+
+1. **Upstox Plus features:** full_d30 WebSocket mode and Expired Instruments APIs require Upstox Plus subscription.
+2. **Protobuf:** Real binary Protobuf decoding requires compiled `_pb2.py`. JSON fallback active in its absence.
+3. **Analytics Token rotation:** Long-lived (1 year) but must be renewed annually.
+4. **OAuth token worker sharing:** Daily OAuth token not shared across workers via Redis. Multi-worker deployments handle token refresh independently (Redis lock acquired by one worker).
+5. **NSE_INDEX intraday:** Upstox returns UDAPI100011 for all NSE_INDEX instruments at 1m–1h. Routing fixed — intraday for indices now uses Angel One exclusively.
+6. **MIDCPNIFTY:** Not available on Upstox at any interval. Always routes to Angel One.
+
+*Unit tests: 4,821+ passing (0 failures) as of 2026-09-22.*

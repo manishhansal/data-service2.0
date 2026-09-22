@@ -1,7 +1,7 @@
 # PROVIDER API USAGE MATRIX
 ## data-service2.0 — AlphaForge Market Data Platform
 
-**Date:** 2026-09-16  
+**Date:** 2026-09-22 *(updated from 2026-09-16)*  
 **Scope:** All documented relevant Angel One SmartAPI and Upstox V2/V3 APIs
 
 Classification:
@@ -30,7 +30,7 @@ Classification:
 
 | API Route | Description | Classification | Reason |
 |-----------|-------------|----------------|--------|
-| POST /historical/v1/getCandleData | Historical OHLCV candles | USED | Primary for EQ/FO intraday 1m-1w |
+| POST /historical/v1/getCandleData | Historical OHLCV candles | USED | Primary for EQ/FO intraday 1m–1w; used by OHLCV catch-up worker via HistoricalEngine |
 | POST /historical/v1/getOIData | Historical Open Interest time-series | USED | Dedicated OI endpoint for derivatives |
 
 ### Live Market Data
@@ -99,7 +99,7 @@ Classification:
 
 | API Route | Version | Description | Classification | Reason |
 |-----------|---------|-------------|----------------|--------|
-| GET /v3/historical-candle/{key}/{unit}/{interval}/{to}/{from} | V3 | Historical OHLCV + OI | USED | Primary for all historical data |
+| GET /v3/historical-candle/{key}/{unit}/{interval}/{to}/{from} | V3 | Historical OHLCV + OI | USED | Primary for all historical data; called by catch-up worker and backfill scripts |
 | GET /v3/historical-candle/intraday/{key}/{unit}/{interval} | V3 | Current-session candles | USED | Intraday gap recovery |
 | GET /v2/historical-candle/... | V2 | Historical candle (deprecated) | DEPRECATED | Replaced by V3. Backward-compat alias kept for tests only |
 | GET /v2/historical-candle/intraday/... | V2 | Intraday (deprecated) | DEPRECATED | Replaced by V3 |
@@ -107,6 +107,10 @@ Classification:
 | GET /v2/expired-instruments/option/contract | V2 (Plus) | Expired option contracts | USED | Historical option universe |
 | GET /v2/expired-instruments/future/contract | V2 (Plus) | Expired future contracts | USED | Historical futures universe |
 | GET /v2/expired-instruments/historical-candle/... | V2 (Plus) | Expired contract candles | USED | Historical F&O OHLCV |
+
+> **NSE_INDEX intraday routing note (2026-09-22):** Upstox returns `UDAPI100011` (Instrument not found) for all `NSE_INDEX` instruments when interval is `1m`–`1h`. The `HistoricalEngine._resolve_provider()` method now routes IDX instruments to Upstox **only for EOD intervals** (`1d`/`1w`/`1M`). Intraday requests for indices fall back to Angel One. `MIDCPNIFTY` (Nifty Midcap Select) is unavailable on Upstox at any interval and always routes to Angel One.
+
+> **301 NSE_EQ\|ISIN keys (2026-09-21):** `_UPSTOX_INSTRUMENT_KEYS` expanded from 51 → 301 symbols, covering all 229 NSE F&O universe stocks with verified ISINs plus all NSE index display name aliases. When `angel_one_token_unknown` fires and the symbol has a registered ISIN key, the engine auto-routes to Upstox and logs `angel_one_token_unknown_upstox_fallback`.
 
 ### Live Market Quotes
 
@@ -149,7 +153,7 @@ Classification:
 | API Route | Version | Description | Classification | Reason |
 |-----------|---------|-------------|----------------|--------|
 | GET /v2/instruments/search | V2 | Instrument search | NOT_IMPLEMENTED | Lower priority; static BOD file used |
-| BOD Instrument JSON files | CDN | Complete instrument master | NOT_IMPLEMENTED | Currently using internal instrument_master table |
+| BOD Instrument JSON files | CDN | Complete instrument master | USED | `_build_instrument_record()` in `load_fno_instrument_master.py` derives ISINs and `NSE_FO|{token}` keys from Upstox BOD JSON; 35,940 mappings seeded into `instrument_provider_mapping` (2026-09-21) |
 
 ### Closing Auction (Sep 2026)
 
@@ -174,9 +178,22 @@ Classification:
 | API Route | Status | Action Taken |
 |-----------|--------|-------------|
 | V2 WebSocket URL (wss://...v2/feed/...) | DISCONTINUED (Aug 2025) | Removed from codebase; V3 authorized URL flow implemented |
-| GET /v2/historical-candle/... | DEPRECATED | All production code migrated to V3; backward-compat alias in tests only |
-| GET /v2/market-quote/ltp | DEPRECATED | All calls migrated to V3 |
-| GET /v2/market-quote/ohlc | DEPRECATED | All calls migrated to V3 |
+| ~~GET /v2/historical-candle/...~~ | ~~V2~~ | ~~Historical candle (deprecated)~~ | ~~DEPRECATED~~ | All production code migrated to V3; backward-compat alias in tests only |
+| GET /v2/market-quote/ltp | V2 | LTP (deprecated) | DEPRECATED | All calls migrated to V3 |
+| GET /v2/market-quote/ohlc | V2 | OHLC (deprecated) | DEPRECATED | All calls migrated to V3 |
+
+---
+
+## NSE BHAVCOPY (new in v2.2.0)
+
+The 5-year backfill campaign (2026-09-21) introduced a direct NSE Bhavcopy loader for F&O daily candles. This is a standalone data source, not a REST provider, but is listed here for completeness.
+
+| Source | Description | Classification | Tables Written |
+|--------|-------------|----------------|----------------|
+| NSE Bhavcopy (pre-2024 via `pybhav`) | F&O daily OHLCV files | USED | `futures_candle`, `options_candle` |
+| NSE Bhavcopy (2024+ direct URL) | `BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip` | USED | `futures_candle`, `options_candle` |
+
+**Coverage:** Sep 2021 → live. 246,986 futures rows, 242,255 options rows. Continuous futures series (`continuous_futures` table) computed from front-month roll logic over bhavcopy data.
 
 ---
 
@@ -196,10 +213,10 @@ The following Upstox APIs are not implemented:
 |----|----------------|-------------|
 | ~~Market Info APIs (May 2026)~~ | **IMPLEMENTED** | All 6 APIs implemented 2026-09-17 (`fetch_oi_data`, `fetch_pcr_data`, etc.) |
 | cas_eligible in instruments | NOT_IMPLEMENTED | CAS eligibility useful but not blocking |
-| Instrument Search (V2) | NOT_IMPLEMENTED | Static BOD instrument files used instead |
+| Instrument Search (V2) | NOT_IMPLEMENTED | `_UPSTOX_INSTRUMENT_KEYS` map (301 symbols) + BOD JSON used instead |
 | Orders, Holdings, Portfolio | NOT_NEEDED | Not a market data service function |
 | Logout | NOT_IMPLEMENTED | Server-side; token expiry handled by TTL |
 
 ---
 
-*Last updated: 2026-09-17. Zero unexplained unused relevant APIs.*
+*Last updated: 2026-09-22. Zero unexplained unused relevant APIs. NSE_INDEX intraday routing fix (UDAPI100011) documented. 301 NSE_EQ|ISIN keys and NSE Bhavcopy loader added.*

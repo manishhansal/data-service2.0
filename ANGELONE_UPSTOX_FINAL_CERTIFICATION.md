@@ -2,12 +2,25 @@
 ## data-service2.0 — AlphaForge Market Data Platform
 
 **Certification Date:** 2026-09-16  
-**Updated:** 2026-09-17 (post live-testing + pipeline gap fixes)  
+**Updated:** 2026-09-22 (v2.2.0 — 5y backfill, fo_universe, OHLCV catch-up worker, IDX routing fix)  
 **Certified by:** Kiro automated audit + implementation  
-**Test Suite:** 4,413 unit tests — ALL PASSING, 0 failures (updated 2026-09-17)  
+**Test Suite:** 4,821+ unit tests — ALL PASSING, 0 failures (updated 2026-09-22)  
 **Scope:** Angel One SmartAPI + Upstox V2/V3 integration in data-service2.0
 
-### Key changes since 2026-09-16
+### Key changes since 2026-09-17 (v2.2.0)
+
+- **5-year OHLCV backfill complete:** ~123M equity candle rows (298 instruments, Sep 2021 → live). Nifty50: full 5y intraday; F&O universe (~249 stocks): ~2y intraday (Upstox plan limit).
+- **NSE F&O bhavcopy loaded:** 246,986 futures rows + 242,255 options rows (Sep 2021 → live) via `scripts/load_fo_bhavcopy_5y.py`.
+- **Continuous futures seeded:** 131,265 rows, 305 underlyings, Sep 2021 → Sep 2026.
+- **`fo_universe` master table:** 314 rows (293 active, 21 retired) — master F&O instrument registry now used by the catch-up worker as the instrument universe source (FO→IDX→EQ priority order).
+- **301 Upstox `NSE_EQ|ISIN` keys:** `_UPSTOX_INSTRUMENT_KEYS` expanded 51→301. All 229 NSE F&O universe stocks with verified ISINs + all NSE index display name aliases.
+- **Angel One → Upstox auto-fallback:** `_fetch_candles()` now silently re-routes to Upstox when `angel_one_token_unknown` fires and the symbol has a registered ISIN key. Logs `angel_one_token_unknown_upstox_fallback`.
+- **35,940 Upstox `NSE_FO|{token}` keys seeded:** `load_fno_instrument_master.py` derives `upstox_key` as `NSE_FO|{angel_token}`. 70,629 total provider mapping rows.
+- **NSE_INDEX intraday routing FIXED:** Upstox returns `UDAPI100011` for all `NSE_INDEX` instruments at intraday intervals. `_resolve_provider()` now routes IDX to Upstox only for EOD (`1d`/`1w`/`1M`); intraday routes to Angel One. `MIDCPNIFTY` unavailable on Upstox at any interval — always uses Angel One.
+- **Continuous OHLCV catch-up worker:** `src/worker_tasks/ohlcv_catchup.py` — runs on startup + EOD 17:00 IST + intraday every 4h. Uses `fo_universe` table for instrument priority. Skips NSE_INDEX intraday intervals for Upstox.
+- **Makefile integration:** `make backfill-5y`, `make load-fno`, `make seed-fo-universe`, `make catchup-status`, `make data-report`.
+
+### Key changes from 2026-09-16 → 2026-09-17
 
 - **Upstox V3 full market quote migration:** `fetch_full_quote` migrated from `/v2/market-quote/quotes` to `/v3/market-quote/quotes` (April 2025 Upstox launch)
 - **Upstox interval restriction lifted:** `_UPSTOX_V2_SUPPORTED_INTERVALS` (5 intervals) replaced with `_UPSTOX_V3_SUPPORTED_INTERVALS` (all 9 intervals)
@@ -57,6 +70,10 @@
 | Angel One token lookup | PASS | angel_token / InstrumentProviderMapping.provider_instrument_id |
 | Point-in-time active_from/active_to | PASS | Enforced in InstrumentMasterService |
 | F&O universe membership | PASS | FnoUniverseMembership model + fno_universe.py engine |
+| fo_universe master table | PASS | 314 rows (293 active, 21 retired); seeded 2026-09-21 via seed_fo_universe.py |
+| 301 Upstox NSE_EQ\|ISIN keys | PASS | `_UPSTOX_INSTRUMENT_KEYS` 51→301; all F&O universe + index aliases (2026-09-21) |
+| 35,940 Upstox NSE_FO\|{token} keys | PASS | instrument_provider_mapping: 70,629 total rows (35,940 Angel One + 35,940 Upstox) |
+| Angel One → Upstox auto-fallback | PASS | `angel_one_token_unknown_upstox_fallback` event; tested (2026-09-21) |
 
 ### LTP
 
@@ -222,7 +239,10 @@
 | OI extracted at index 6 | PASS | open_interest from V3 array; test_upstox_adapter_v3.py |
 | Cash OI=0 → NULL | PASS | Normalizer treats 0 OI as missing for cash |
 | 3m blocked | PASS | ValueError raised before I/O |
+| NSE_INDEX intraday blocked (UDAPI100011) | PASS | IDX instruments skip intraday Upstox calls; route to Angel One (fix 2026-09-22) |
+| MIDCPNIFTY unavailable on Upstox | DOCUMENTED | UDAPI100011 at all intervals; always routes to Angel One |
 | Checkpoint resumable | PASS | Same checkpoint mechanism as Angel One |
+| OHLCV catch-up worker integration | PASS | `ohlcv_catchup._run_pass()` calls `HistoricalEngine.run_backfill()`; fo_universe priority order |
 
 ### Intraday OHLCV (V3)
 
@@ -375,19 +395,22 @@
 
 | Table | Status | Evidence |
 |-------|--------|---------|
-| equity_candle (hypertable) | PASS | CHECK interval_str <> '3m'; tested |
-| futures_candle (hypertable) | PASS | OI nullable; CHECK constraints; tested |
-| options_candle (hypertable) | PASS | strike/option_type constraints; tested |
+| equity_candle (hypertable) | PASS | CHECK interval_str <> '3m'; tested; ~123M rows after 5y backfill |
+| futures_candle (hypertable) | PASS | OI nullable; CHECK constraints; 246K bhavcopy + ~55K intraday rows |
+| options_candle (hypertable) | PASS | strike/option_type constraints; 242K bhavcopy rows |
+| continuous_futures | PASS | 131,265 rows, 305 underlyings, Sep 2021 → Sep 2026 (new in v2.2.0) |
+| fo_universe | PASS | 314 rows (293 active, 21 retired); master F&O registry (new in v2.2.0) |
 | market_tick (hypertable) | PASS | 7-day retention; tested |
 | market_quote | PASS | depth_json column added; net_change added |
 | option_chain_snapshot | PASS | TimescaleDB; quality_status; tested |
 | option_chain_contract | PASS | Greeks nullable; tested |
 | option_greeks_snapshot (hypertable) | PASS | IV/Greeks all nullable; tested |
-| market_depth (hypertable, new) | PASS | D5/D30; 1-day retention; migration added |
-| reconciliation_record (new) | PASS | Both provider observations preserved |
-| data_incident (new) | PASS | Durable; never truncated |
-| closing_auction_snapshot (new) | PASS | indicativeEquilibriumPrice NOT ltp |
+| market_depth (hypertable) | PASS | D5/D30; 1-day retention; migration added |
+| reconciliation_record | PASS | Both provider observations preserved |
+| data_incident | PASS | Durable; never truncated |
+| closing_auction_snapshot | PASS | indicativeEquilibriumPrice NOT ltp |
 | instrument_master | PASS | InstrumentProviderMapping for provider tokens |
+| instrument_provider_mapping | PASS | 70,629 total rows (35,940 Angel One + 35,940 Upstox NSE_FO keys) |
 | ingestion_job | PASS | Full row accounting |
 | ingestion_checkpoint | PASS | Resumable per provider/dataset/instrument |
 | fno_universe_membership | PASS | Point-in-time; effective_from/effective_to |
@@ -444,12 +467,15 @@
 | No survivorship bias | ✅ PASS |
 | No unexplained API gaps | ✅ PASS — all gaps explained in PROVIDER_API_USAGE_MATRIX.md |
 | No deprecated production API usage | ✅ PASS |
-| No Python syntax errors | ✅ PASS — 4397 tests pass |
-| No lint errors in new files | ✅ PASS — F401/F841 fixed |
-| No test failures | ✅ PASS — 4397/4397 passed |
+| No Python syntax errors | ✅ PASS — 4821+ tests pass |
+| No lint errors in new files | ✅ PASS — ruff clean |
+| No test failures | ✅ PASS — 4821+/4821+ passed |
 | No runtime errors | ✅ PASS — all imports verified |
 | AlphaForge never calls providers directly | ✅ PASS — all routes through data-service2.0 |
 | CAS data not treated as LTP | ✅ PASS — ClosingAuctionSnapshot; no ltp field |
+| 5y historical data available | ✅ PASS — ~123M equity + 246K futures + 242K options rows |
+| OHLCV catch-up worker running | ✅ PASS — EOD 17:00 IST + intraday 4h; fo_universe priority |
+| NSE_INDEX intraday routing correct | ✅ PASS — IDX intraday → Angel One; Upstox → EOD only |
 
 ---
 
@@ -473,6 +499,6 @@ The following conditions must be satisfied before full production certification:
 
 ---
 
-*Certification produced: 2026-09-16. Test command: `python3 -m pytest tests/unit/ 2>&1 | tail -1` → 4397 passed.*
+*Certification produced: 2026-09-16. Last updated: 2026-09-22 (v2.2.0). Test command: `python3 -m pytest tests/unit/ 2>&1 | tail -1` → 4821+ passed.*
 
 *All provider communication remains inside data-service2.0. AlphaForge must never call Angel One, Upstox, or any other provider directly.*
