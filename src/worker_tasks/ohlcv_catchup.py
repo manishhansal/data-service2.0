@@ -109,9 +109,11 @@ _RAW_INTRADAY  = os.environ.get("CATCHUP_INTERVALS_INTRADAY", "1m,5m,10m,15m,30m
 _INTERVALS_EOD      = [s.strip() for s in _RAW_EOD.split(",")     if s.strip()]
 _INTERVALS_INTRADAY = [s.strip() for s in _RAW_INTRADAY.split(",") if s.strip()]
 
-# Default lookback when no checkpoint exists — how far back to seed fresh
+# Default lookback when no checkpoint exists — how far back to seed fresh.
+# For IDX the intraday intervals are blocked entirely (see _run_pass),
+# so only EOD lookbacks matter for indices.
 _DEFAULT_LOOKBACK: dict[str, int] = {
-    "1m":  730,    # 2 years (Upstox free plan limit)
+    "1m":  730,    # 2 years (Upstox free plan limit for EQ)
     "5m":  730,
     "10m": 730,
     "15m": 730,
@@ -121,6 +123,10 @@ _DEFAULT_LOOKBACK: dict[str, int] = {
     "1w":  1826,
     "1M":  1826,
 }
+
+# Upstox intraday is NOT available for NSE_INDEX instruments.
+# This set is used to skip those combinations without even attempting a fetch.
+_IDX_UNSUPPORTED_INTRADAY = frozenset({"1m", "5m", "10m", "15m", "30m", "1h"})
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +284,17 @@ async def _run_pass(
     # Build work list: intervals first (so each interval completes before next)
     # Priority: intraday work is interleaved per-instrument so no single
     # instrument monopolises the semaphore for all its intervals.
-    work: list[tuple[dict, str]] = [
-        (instr, ivl)
-        for instr in instruments
-        for ivl in intervals
-    ]
+    # Skip intraday intervals for IDX instruments — Upstox NSE_INDEX keys
+    # do not support intraday (1m-1h) via the historical-candle endpoint.
+    _IDX_EOD_ONLY = frozenset({"1d", "1w", "1M"})
+
+    work: list[tuple[dict, str]] = []
+    for instr in instruments:
+        for ivl in intervals:
+            # Skip intraday for index instruments — not supported by any free provider
+            if instr.get("instrument_class") == "IDX" and ivl not in _IDX_EOD_ONLY:
+                continue
+            work.append((instr, ivl))
 
     sem = asyncio.Semaphore(concurrency)
     last_symbol: list[str] = [""]

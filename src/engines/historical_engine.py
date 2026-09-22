@@ -99,11 +99,11 @@ _FALLBACK_PROVIDER = ProviderId.OPENCHART
 # Source: design doc "Provider chunk limits" table + capability_matrix.py.
 _ANGEL_ONE_CHUNK_DAYS: dict[str, int] = {
     "1m":  30,
-    "5m":  90,
-    "10m": 90,
-    "15m": 90,
-    "30m": 90,
-    "1h":  90,
+    "5m":  30,   # was 90 — reduced to 30 so Upstox fallback doesn't get oversized windows
+    "10m": 30,   # was 90
+    "15m": 30,   # was 90
+    "30m": 30,   # was 90
+    "1h":  30,   # was 90
     "1d":  365,
     "1w":  365,
     "1M":  365,
@@ -212,7 +212,7 @@ _UPSTOX_INSTRUMENT_KEYS: dict[str, str] = {
     "NIFTY BANK":         "NSE_INDEX|Nifty Bank",
     "FINNIFTY":           "NSE_INDEX|Nifty Fin Service",
     "NIFTY FIN SERVICE":  "NSE_INDEX|Nifty Fin Service",
-    "MIDCPNIFTY":         "NSE_INDEX|Nifty Midcap Select",
+    "MIDCPNIFTY":         "NSE_INDEX|Nifty Midcap Select",   # NOTE: Upstox returns UDAPI100011 — instrument not found; excluded from intraday routing
     "NIFTY MIDCAP 50":    "NSE_INDEX|Nifty Midcap 50",
     "NIFTYNEXT50":        "NSE_INDEX|Nifty Next 50",
     "INDIAVIX":           "NSE_INDEX|India VIX",
@@ -1749,11 +1749,19 @@ class HistoricalEngine:
             settings = get_settings()
             angel_available = bool(settings.angel_one_api_key and settings.angel_one_mpin)
             upstox_available = bool(settings.upstox_access_token or settings.upstox_analytics_key)
-            if upstox_available and interval in _UPSTOX_V3_SUPPORTED_INTERVALS:
+            # IMPORTANT: Upstox NSE_INDEX instruments only support 1d/1w/1M.
+            # Intraday (1m-1h) returns UDAPI100011 "Instrument not found" for
+            # all NSE_INDEX keys — Upstox does not provide index intraday data
+            # via the historical-candle endpoint.
+            _index_eod = interval in ("1d", "1w", "1M")
+            if upstox_available and _index_eod:
                 return ProviderId.UPSTOX
             if angel_available:
                 return ProviderId.ANGEL_ONE
-            return ProviderId.UPSTOX
+            # Fallback: Upstox for EOD, skip intraday for indices
+            if upstox_available and _index_eod:
+                return ProviderId.UPSTOX
+            return ProviderId.ANGEL_ONE
 
         if instrument_class == "FO" and interval == "1d":
             # Jugaad-data F&O bhavcopy is broken for dates after 2024-07-08
