@@ -170,7 +170,7 @@ _MATRIX: list[ProviderCapability] = [
         liveSupported=True,
         historySupported=False,
         maxChunkDays=0,
-        requestsPerSecond=10.0,
+        requestsPerSecond=50.0,
         intervalSupport=[],
         sourceType=SourceType.BROKER_AUTHENTICATED,
         priority=2,
@@ -183,7 +183,7 @@ _MATRIX: list[ProviderCapability] = [
         liveSupported=True,
         historySupported=False,
         maxChunkDays=0,
-        requestsPerSecond=10.0,
+        requestsPerSecond=50.0,
         intervalSupport=[],
         sourceType=SourceType.BROKER_AUTHENTICATED,
         priority=2,
@@ -196,7 +196,7 @@ _MATRIX: list[ProviderCapability] = [
         liveSupported=True,
         historySupported=False,
         maxChunkDays=0,
-        requestsPerSecond=10.0,
+        requestsPerSecond=50.0,
         intervalSupport=[],
         sourceType=SourceType.BROKER_AUTHENTICATED,
         priority=1,   # PRIMARY for index live
@@ -210,9 +210,9 @@ _MATRIX: list[ProviderCapability] = [
         supported=True,
         liveSupported=False,
         historySupported=True,
-        maxChunkDays=7,           # tightest (1m)
-        requestsPerSecond=10.0,
-        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h", "1d"],
+        maxChunkDays=7,           # tightest (1m); V3 allows up to 1 month for 1m
+        requestsPerSecond=50.0,
+        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h", "1d", "1w", "1M"],
         sourceType=SourceType.BROKER_AUTHENTICATED,
         priority=1,
     ),
@@ -226,8 +226,8 @@ _MATRIX: list[ProviderCapability] = [
         liveSupported=False,
         historySupported=True,
         maxChunkDays=7,
-        requestsPerSecond=10.0,
-        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h", "1d"],
+        requestsPerSecond=50.0,
+        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h", "1d", "1w", "1M"],
         sourceType=SourceType.BROKER_AUTHENTICATED,
         priority=2,
     ),
@@ -241,10 +241,166 @@ _MATRIX: list[ProviderCapability] = [
         liveSupported=False,
         historySupported=True,
         maxChunkDays=7,
-        requestsPerSecond=10.0,
-        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h", "1d"],
+        requestsPerSecond=50.0,
+        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h", "1d", "1w", "1M"],
         sourceType=SourceType.BROKER_AUTHENTICATED,
         priority=2,
+    ),
+
+    # ── HISTORICAL OI ────────────────────────────────────────────────────
+
+    # Angel One Historical OI — dedicated OI time-series endpoint
+    ProviderCapability(
+        provider=ProviderId.ANGEL_ONE,
+        dataType=DataType.HISTORICAL_OI,
+        instrumentClass="FO",
+        supported=True,
+        liveSupported=False,
+        historySupported=True,
+        maxChunkDays=30,
+        requestsPerSecond=3.0,
+        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h", "1d"],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+
+    # ── INTRADAY CANDLES ─────────────────────────────────────────────────
+
+    # Upstox V3 Intraday Candles — current session only
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.INTRADAY_CANDLE,
+        instrumentClass="EQ",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h"],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.INTRADAY_CANDLE,
+        instrumentClass="FO",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h"],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.INTRADAY_CANDLE,
+        instrumentClass="IDX",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=["1m", "5m", "10m", "15m", "30m", "1h"],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+
+    # ── OPTION GREEKS ────────────────────────────────────────────────────
+
+    # Upstox V3 Option Greeks REST — max 50 per request
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.OPTION_GREEKS,
+        instrumentClass="FO",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=[],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+
+    # Angel One Option Greeks REST — per underlying+expiry
+    ProviderCapability(
+        provider=ProviderId.ANGEL_ONE,
+        dataType=DataType.OPTION_GREEKS,
+        instrumentClass="FO",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=3.0,
+        intervalSupport=[],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=2,
+    ),
+
+    # ── OPTION CHAIN ─────────────────────────────────────────────────────
+
+    # Upstox Option Chain — CE+PE market data + Greeks in one call
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.OPTION_CHAIN,
+        instrumentClass="FO",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=[],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.OPTION_CHAIN,
+        instrumentClass="IDX",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=[],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+
+    # ── MARKET INFORMATION ───────────────────────────────────────────────
+
+    # Upstox Market Information — holidays, timings, exchange status
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.MARKET_INFORMATION,
+        instrumentClass="ALL",
+        supported=True,
+        liveSupported=True,
+        historySupported=True,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=[],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
+    ),
+
+    # ── CLOSING AUCTION ──────────────────────────────────────────────────
+
+    # Upstox CAS data (September 2026)
+    ProviderCapability(
+        provider=ProviderId.UPSTOX,
+        dataType=DataType.CLOSING_AUCTION,
+        instrumentClass="EQ",
+        supported=True,
+        liveSupported=True,
+        historySupported=False,
+        maxChunkDays=0,
+        requestsPerSecond=50.0,
+        intervalSupport=[],
+        sourceType=SourceType.BROKER_AUTHENTICATED,
+        priority=1,
     ),
 
     # =========================================================================
@@ -572,17 +728,19 @@ ANGEL_ONE_CHUNK_DAYS: dict[str, int] = {
     "1M": 365,
 }
 
-# Per-interval chunk-day overrides for Upstox
+# Per-interval chunk-day overrides for Upstox V3
+# V3 windows: minutes(1-15)=28d, minutes(>15)=90d, hours=90d,
+#             days=365d, weeks=730d, months=3650d
 UPSTOX_CHUNK_DAYS: dict[str, int] = {
-    "1m": 7,
-    "5m": 30,
-    "10m": 30,
-    "15m": 30,
-    "30m": 30,
-    "1h": 30,
-    "1d": 365,
-    "1w": 365,
-    "1M": 365,
+    "1m":  28,    # V3: 1-month window for <=15min intervals
+    "5m":  28,
+    "10m": 28,
+    "15m": 28,
+    "30m": 90,    # V3: 1-quarter window for >15min
+    "1h":  90,
+    "1d":  365,   # V3: 1 decade available; use 1 year as practical chunk
+    "1w":  730,
+    "1M":  3650,
 }
 
 

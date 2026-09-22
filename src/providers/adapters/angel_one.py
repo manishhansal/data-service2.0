@@ -115,10 +115,14 @@ _BASE_URL = "https://apiconnect.angelbroking.com"
 # REST endpoints
 _LOGIN_URL = f"{_BASE_URL}/rest/auth/angelbroking/user/v1/loginByPassword"
 _CANDLE_URL = f"{_BASE_URL}/rest/secure/angelbroking/historical/v1/getCandleData"
+_OI_URL = f"{_BASE_URL}/rest/secure/angelbroking/historical/v1/getOIData"
 _QUOTE_URL = f"{_BASE_URL}/rest/secure/angelbroking/market/v1/quote/"
+_LTP_URL = f"{_BASE_URL}/rest/secure/angelbroking/order/v1/getLtpData"
 _PCR_URL = f"{_BASE_URL}/rest/secure/angelbroking/marketData/v1/putCallRatio"
 _OI_BUILDUP_URL = f"{_BASE_URL}/rest/secure/angelbroking/marketData/v1/OIBuildup"
 _GAINERS_LOSERS_URL = f"{_BASE_URL}/rest/secure/angelbroking/marketData/v1/gainersAndLosers"
+_OPTION_GREEK_URL = f"{_BASE_URL}/rest/secure/angelbroking/marketData/v1/optionGreek"
+_NSE_INTRADAY_URL = f"{_BASE_URL}/rest/secure/angelbroking/marketData/v1/nseIntraday"
 
 # Rate limit: 3 req/s (Capability Matrix)
 _REQUESTS_PER_SECOND = 3.0
@@ -931,11 +935,31 @@ class AngelOneAdapter:
                 provider=_PROVIDER_NAME,
             )
 
-        data = body.get("data") or {}
-        data["provider"] = _PROVIDER_NAME
-        data["sourceType"] = _SOURCE_TYPE.value
-        data["fetchedAt"] = _utc_iso_now()
-        return data
+        data = body.get("data")
+        # Angel One PCR response may be a list of per-underlying records
+        # (observed live) or a single dict (older API versions / test fixtures).
+        # Normalise to a list so all consumers always receive the same shape.
+        if isinstance(data, list):
+            records = data
+        elif isinstance(data, dict):
+            records = [data] if data else []
+        else:
+            records = []
+
+        fetched_at = _utc_iso_now()
+        for record in records:
+            if isinstance(record, dict):
+                record["provider"] = _PROVIDER_NAME
+                record["sourceType"] = _SOURCE_TYPE.value
+                record["fetchedAt"] = fetched_at
+
+        logger.debug(
+            "angel_one_pcr_fetched",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+            record_count=len(records),
+        )
+        return {"data": records, "provider": _PROVIDER_NAME, "fetchedAt": fetched_at}
 
     async def fetch_oi_buildup(self) -> list[dict[str, Any]]:
         """Fetch OI buildup data (long/short buildup, covering, unwinding).
@@ -986,6 +1010,288 @@ class AngelOneAdapter:
             record_count=len(records),
         )
         return records
+
+    async def fetch_historical_oi(
+        self,
+        symbol: str,
+        token: str,
+        from_date: str,
+        to_date: str,
+        interval: str,
+        exchange: str = "NFO",
+    ) -> list[dict[str, Any]]:
+        """Fetch historical Open Interest data from Angel One SmartAPI.
+
+        Uses the dedicated OI endpoint which returns a time-series of OI
+        values for derivative instruments.  This is separate from the OHLCV
+        endpoint and is the authoritative source for historical OI from
+        Angel One.
+
+        Args:
+            symbol:    Trading symbol (e.g. ``"NIFTY23DECFUT"``).
+            token:     Angel One instrument token (numeric string).
+            from_date: Start datetime as ``"YYYY-MM-DD HH:MM"`` (IST).
+            to_date:   End datetime as ``"YYYY-MM-DD HH:MM"`` (IST).
+            interval:  Canonical interval string.  Valid: 1m,5m,10m,15m,30m,1h,1d.
+                       3m raises ProviderUnsupportedError.
+            exchange:  Exchange code — typically ``"NFO"`` or ``"MCX"``.
+
+        Returns:
+            List of OI records with keys: timestamp, openInterest, provider.
+
+        Raises:
+            ProviderUnsupportedError: If interval is unsupported.
+            ProviderAuthError:        Authentication failed.
+            ProviderRateLimitedError: HTTP 429 from upstream.
+            ProviderUnavailableError: HTTP 5xx or network error.
+            ProviderDataError:        Malformed response.
+        """
+        if interval in _BANNED_INTERVALS:
+            raise ProviderUnsupportedError(
+                "interval 3m is permanently unsupported for Indian market data",
+                provider=_PROVIDER_NAME,
+            )
+
+        smartapi_interval = _INTERVAL_MAP.get(interval)
+        if smartapi_interval is None:
+            raise ProviderUnsupportedError(
+                f"Interval {interval!r} is not supported by Angel One getOIData",
+                provider=_PROVIDER_NAME,
+            )
+
+        payload: dict[str, Any] = {
+            "exchange": exchange,
+            "symboltoken": token,
+            "interval": smartapi_interval,
+            "fromdate": from_date,
+            "todate": to_date,
+        }
+
+        logger.debug(
+            "angel_one_fetch_historical_oi",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+            symbol=symbol,
+            exchange=exchange,
+            interval=interval,
+            from_date=from_date,
+            to_date=to_date,
+            token=token,
+        )
+
+        body = await self._request("POST", _OI_URL, json_body=payload)
+
+        if not body.get("status", False):
+            error_msg = body.get("message", "Unknown error")
+            if "no data" in error_msg.lower() or "no record" in error_msg.lower():
+                raise ProviderMarketClosedError(
+                    f"Angel One getOIData returned no data: {error_msg}",
+                    provider=_PROVIDER_NAME,
+                )
+            raise ProviderDataError(
+                f"Angel One getOIData failed: {error_msg}",
+                provider=_PROVIDER_NAME,
+            )
+
+        raw_oi = body.get("data") or []
+        if not isinstance(raw_oi, list):
+            raise ProviderDataError(
+                "Angel One getOIData 'data' field is not a list",
+                provider=_PROVIDER_NAME,
+            )
+
+        # OI data format: [[timestamp, openInterest], ...]
+        oi_records: list[dict[str, Any]] = []
+        for row in raw_oi:
+            if isinstance(row, list) and len(row) >= 2:
+                oi_records.append({
+                    "timestamp":     row[0],
+                    "openInterest":  row[1],
+                    "provider":      _PROVIDER_NAME,
+                    "sourceType":    _SOURCE_TYPE.value,
+                    "symbol":        symbol,
+                    "exchange":      exchange,
+                    "interval":      interval,
+                })
+            elif isinstance(row, dict):
+                # Some response versions return dicts directly
+                row["provider"] = _PROVIDER_NAME
+                row["sourceType"] = _SOURCE_TYPE.value
+                oi_records.append(row)
+
+        logger.debug(
+            "angel_one_historical_oi_fetched",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+            symbol=symbol,
+            interval=interval,
+            record_count=len(oi_records),
+        )
+        return oi_records
+
+    async def fetch_option_greeks(
+        self,
+        name: str,
+        expiry_date: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch option Greeks for an underlying + expiry from Angel One SmartAPI.
+
+        Returns delta, gamma, theta, vega, implied volatility, trade volume,
+        and open interest for all strikes of the given underlying on the
+        specified expiry.
+
+        Args:
+            name:        Underlying symbol name, e.g. ``"NIFTY"``, ``"BANKNIFTY"``,
+                         ``"RELIANCE"``.
+            expiry_date: Expiry date as ``"DDMMMYYYY"`` (e.g. ``"29FEB2024"``).
+                         Angel One uses this non-ISO format.
+
+        Returns:
+            List of Greeks records with keys: strikePrice, optionType, delta,
+            gamma, theta, vega, impliedVolatility, tradeVolume, openInterest,
+            provider.
+
+        Raises:
+            ProviderAuthError:        Authentication failed.
+            ProviderRateLimitedError: HTTP 429 from upstream.
+            ProviderUnavailableError: HTTP 5xx or network error.
+            ProviderDataError:        Malformed or error response.
+        """
+        payload: dict[str, Any] = {
+            "name": name,
+            "expirydate": expiry_date,
+        }
+
+        logger.debug(
+            "angel_one_fetch_option_greeks",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+            name=name,
+            expiry_date=expiry_date,
+        )
+
+        body = await self._request("POST", _OPTION_GREEK_URL, json_body=payload)
+
+        if not body.get("status", False):
+            error_msg = body.get("message", "Unknown error")
+            raise ProviderDataError(
+                f"Angel One optionGreek fetch failed: {error_msg}",
+                provider=_PROVIDER_NAME,
+            )
+
+        records = body.get("data") or []
+        if not isinstance(records, list):
+            raise ProviderDataError(
+                "Angel One optionGreek 'data' is not a list",
+                provider=_PROVIDER_NAME,
+            )
+
+        fetched_at = _utc_iso_now()
+        for record in records:
+            if isinstance(record, dict):
+                record["provider"] = _PROVIDER_NAME
+                record["sourceType"] = _SOURCE_TYPE.value
+                record["fetchedAt"] = fetched_at
+                record["underlyingName"] = name
+                record["expiryDate"] = expiry_date
+
+        logger.debug(
+            "angel_one_option_greeks_fetched",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+            name=name,
+            expiry_date=expiry_date,
+            record_count=len(records),
+        )
+        return records
+
+    async def fetch_ltp(
+        self,
+        token: str,
+        exchange: str,
+        trading_symbol: str,
+    ) -> dict[str, Any]:
+        """Fetch LTP for a single instrument using the lightweight getLtpData endpoint.
+
+        This is more efficient than fetch_live_quote (FULL mode) when only the
+        last traded price is needed — it avoids the full market data response.
+
+        Args:
+            token:           Angel One instrument token.
+            exchange:        Exchange code (e.g. ``"NSE"``, ``"NFO"``).
+            trading_symbol:  Trading symbol (e.g. ``"RELIANCE-EQ"``).
+
+        Returns:
+            Dict with ltp, tradingsymbol, symboltoken, exchange.
+
+        Raises:
+            ProviderMarketClosedError: Market is closed (empty data).
+            ProviderAuthError:         Authentication failed.
+            ProviderRateLimitedError:  HTTP 429 from upstream.
+            ProviderUnavailableError:  HTTP 5xx or network error.
+            ProviderDataError:         Malformed response.
+        """
+        payload: dict[str, Any] = {
+            "exchange": exchange,
+            "tradingsymbol": trading_symbol,
+            "symboltoken": token,
+        }
+
+        logger.debug(
+            "angel_one_fetch_ltp",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+            exchange=exchange,
+            token=token,
+        )
+
+        body = await self._request("POST", _LTP_URL, json_body=payload)
+
+        if not body.get("status", False):
+            error_msg = body.get("message", "Unknown error")
+            raise ProviderDataError(
+                f"Angel One getLtpData failed: {error_msg}",
+                provider=_PROVIDER_NAME,
+            )
+
+        data = body.get("data") or {}
+        data["provider"] = _PROVIDER_NAME
+        data["sourceType"] = _SOURCE_TYPE.value
+        return data
+
+    async def fetch_nse_intraday(self) -> dict[str, Any]:
+        """Fetch NSE intraday market breadth / OHLC summary data.
+
+        Returns:
+            Raw NSE intraday data dict with provider metadata attached.
+
+        Raises:
+            ProviderAuthError:        Authentication failed.
+            ProviderRateLimitedError: HTTP 429 from upstream.
+            ProviderUnavailableError: HTTP 5xx or network error.
+            ProviderDataError:        Malformed or error response.
+        """
+        logger.debug(
+            "angel_one_fetch_nse_intraday",
+            component="angel_one_adapter",
+            provider=_PROVIDER_NAME,
+        )
+
+        body = await self._request("GET", _NSE_INTRADAY_URL)
+
+        if not body.get("status", False):
+            error_msg = body.get("message", "Unknown error")
+            raise ProviderDataError(
+                f"Angel One nseIntraday fetch failed: {error_msg}",
+                provider=_PROVIDER_NAME,
+            )
+
+        data = body.get("data") or {}
+        if isinstance(data, dict):
+            data["provider"] = _PROVIDER_NAME
+            data["sourceType"] = _SOURCE_TYPE.value
+            data["fetchedAt"] = _utc_iso_now()
+        return data
 
     async def fetch_gainers_losers(self) -> dict[str, Any]:
         """Fetch top OI/price gainers and losers from Angel One SmartAPI.

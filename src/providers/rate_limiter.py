@@ -46,9 +46,13 @@ _DEFAULT_RPS: float = 1.0
 #: Per-provider rate limits in requests per second.
 #: Used by TokenBucketRateLimiter when a capability-specific override is not
 #: provided.  Callers may also pass requestsPerSecond directly via acquire().
+#:
+#: Upstox rate limits (per NSE circular, May 2025):
+#:   Standard APIs: 50 req/s, 500/min, 2000/30min.
+#:   Order APIs: 10 req/s (not used here for market data).
 PROVIDER_RATE_LIMITS: dict[str, float] = {
     ProviderId.ANGEL_ONE.value:     3.0,
-    ProviderId.UPSTOX.value:        10.0,
+    ProviderId.UPSTOX.value:        50.0,   # FIXED: was 10.0, actual is 50 req/s
     ProviderId.SCRAPLING_NSE.value: 2.0,
     ProviderId.JUGAAD_DATA.value:   1.0,
     ProviderId.OPENCHART.value:     5.0,
@@ -477,3 +481,184 @@ class TokenBucketRateLimiter:
             local._refill()
             return local.tokens
         return None
+
+
+# ---------------------------------------------------------------------------
+# HierarchicalRateLimiter
+# ---------------------------------------------------------------------------
+# Upstox enforces three independent rolling-window quotas:
+#   Bucket 1 — 50  requests / second
+#   Bucket 2 — 500 requests / minute
+#   Bucket 3 — 2000 requests / 30 minutes
+#
+# A request must pass ALL three windows before it is allowed.  The per-second
+# TokenBucketRateLimiter alone does NOT prevent burst violations at the
+# minute or 30-minute level.
+#
+# This class wraps the existing TokenBucketRateLimiter (per-second bucket)
+# and adds two sliding-window counters for the minute and 30-minute quotas.
+# All three are Redis-backed and cross-replica safe.
+#
+# Provider support:
+#   - "upstox":    all three windows enforced
+#   - all others:  only the per-second bucket is enforced (existing behaviour)
+#
+# Requirements: Phase J / §Provider Gateway Hierarchical Rate Limits
+
+_UPSTOX_WINDOW_QUOTAS: dict[str, tuple[int, int]] = {
+    # "window_key_suffix": (window_seconds, max_requests)
+    "per_min":   (60,   500),
+    "per_30min": (1800, 2000),
+}
+
+
+class HierarchicalRateLimiter:
+    """Enforces per-second, per-minute, and per-30-minute rate limits.
+
+    Wraps ``TokenBucketRateLimiter`` for the per-second bucket and adds
+    Redis sorted-set sliding windows for the per-minute and per-30-minute
+    quotas.  Only Upstox currently has multi-window quotas; all other
+    providers delegate to the per-second bucket only.
+
+    Args:
+        redis_client:    Async Redis client.  When ``None`` falls back to
+                         local-only mode (no cross-replica safety).
+        queue_max_depth: Forwarded to the inner TokenBucketRateLimiter.
+        burst_multiplier: Forwarded to the inner TokenBucketRateLimiter.
+
+    Usage::
+
+        limiter = HierarchicalRateLimiter(redis_client=redis)
+        allowed = await limiter.try_acquire("upstox", "HISTORICAL_OHLCV")
+        if not allowed:
+            raise ProviderRateLimitedError(...)
+    """
+
+    _SLIDING_KEY_TEMPLATE = "mds:rl_sw:{provider}:{window}"
+
+    def __init__(
+        self,
+        redis_client=None,
+        *,
+        queue_max_depth: int = 100,
+        burst_multiplier: float = 2.0,
+    ) -> None:
+        self._redis = redis_client
+        self._inner = TokenBucketRateLimiter(
+            redis_client=redis_client,
+            queue_max_depth=queue_max_depth,
+            burst_multiplier=burst_multiplier,
+        )
+
+    async def try_acquire(self, provider_id: str, capability: str) -> bool:
+        """Try to acquire capacity across all applicable rate-limit windows.
+
+        Returns ``True`` immediately if all windows allow the request.
+        Returns ``False`` if any window is exhausted (caller should back off).
+
+        The per-second token-bucket is checked last (it blocks briefly on
+        overflow) so the faster sliding-window rejections happen first.
+        """
+        # Sliding-window checks apply only to Upstox
+        if provider_id == ProviderId.UPSTOX.value and self._redis is not None:
+            now_ts = time.time()
+            for window_suffix, (window_sec, max_req) in _UPSTOX_WINDOW_QUOTAS.items():
+                key = self._SLIDING_KEY_TEMPLATE.format(
+                    provider=provider_id, window=window_suffix
+                )
+                try:
+                    # Remove entries older than the window
+                    cutoff = now_ts - window_sec
+                    pipe = self._redis.pipeline()
+                    pipe.zremrangebyscore(key, "-inf", cutoff)
+                    pipe.zcard(key)
+                    _, current_count = await pipe.execute()
+                    if current_count >= max_req:
+                        logger.warning(
+                            "upstox_sliding_window_exhausted",
+                            window=window_suffix,
+                            current=current_count,
+                            limit=max_req,
+                            component="hierarchical_rate_limiter",
+                        )
+                        return False
+                    # Record this request in the window
+                    entry_id = f"{now_ts:.6f}"
+                    await self._redis.zadd(key, {entry_id: now_ts})
+                    await self._redis.expire(key, window_sec + 60)  # safety TTL
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "sliding_window_redis_error",
+                        window=window_suffix,
+                        error=str(exc),
+                        component="hierarchical_rate_limiter",
+                    )
+                    # Redis failure → degrade gracefully; per-second bucket still enforced
+
+        # Per-second token-bucket (for all providers)
+        return await self._inner.try_acquire(provider_id, capability)
+
+    async def acquire(
+        self,
+        provider_id: str,
+        capability: str,
+        *,
+        timeout_sec: float = 30.0,
+    ) -> None:
+        """Block until capacity is available across all windows.
+
+        Raises ``ProviderQueueFullError`` if the per-second queue fills up.
+        Uses polling with jitter for the sliding-window checks.
+        """
+        import random  # noqa: PLC0415
+        deadline = time.monotonic() + timeout_sec
+        while True:
+            ok = await self.try_acquire(provider_id, capability)
+            if ok:
+                return
+            if time.monotonic() >= deadline:
+                raise ProviderQueueFullError(
+                    provider_id=provider_id,
+                    capability=capability,
+                    queue_depth=self._inner._queue_max_depth,
+                )
+            jitter = random.uniform(0.0, 0.02)
+            await asyncio.sleep(0.05 + jitter)
+
+    def waiting_count(self, provider_id: str, capability: str) -> int:
+        """Forward to inner bucket's waiting count."""
+        return self._inner.waiting_count(provider_id, capability)
+
+    async def current_tokens(
+        self, provider_id: str, capability: str
+    ) -> Optional[float]:
+        """Forward to inner bucket's token count."""
+        return await self._inner.current_tokens(provider_id, capability)
+
+    async def get_window_usage(self, provider_id: str) -> dict[str, dict]:
+        """Return current usage for all sliding windows (Upstox only).
+
+        Returns a dict mapping window name → {current, limit, window_sec}.
+        Returns empty dict for providers with no sliding-window quotas.
+        """
+        if provider_id != ProviderId.UPSTOX.value or self._redis is None:
+            return {}
+        now_ts = time.time()
+        result: dict[str, dict] = {}
+        for window_suffix, (window_sec, max_req) in _UPSTOX_WINDOW_QUOTAS.items():
+            key = self._SLIDING_KEY_TEMPLATE.format(
+                provider=provider_id, window=window_suffix
+            )
+            try:
+                cutoff = now_ts - window_sec
+                await self._redis.zremrangebyscore(key, "-inf", cutoff)
+                current = await self._redis.zcard(key)
+                result[window_suffix] = {
+                    "current": int(current),
+                    "limit": max_req,
+                    "window_sec": window_sec,
+                    "remaining": max(0, max_req - int(current)),
+                }
+            except Exception:  # noqa: BLE001
+                result[window_suffix] = {"error": "redis_unavailable"}
+        return result

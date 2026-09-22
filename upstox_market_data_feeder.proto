@@ -1,0 +1,96 @@
+// Upstox Market Data Feeder Protocol Buffer definition
+// Source: Upstox API v3 WebSocket documentation
+// Generated for: data-service2.0
+// Reference: https://upstox.com/developer/api-documentation/feed-proto-files
+syntax = "proto3";
+
+package com.upstox.marketdatafeeder.rpc.proto;
+
+option java_package = "com.upstox.marketdatafeeder.rpc.proto";
+option java_outer_classname = "MarketDataFeeder";
+
+// Top-level response containing a map of feeds keyed by instrument_key
+message FeedResponse {
+  map<string, Feed> feeds = 1;
+  int64 current_ts = 2;
+}
+
+// Per-instrument feed — contains various data submessages
+message Feed {
+  LTPC ltpc = 1;
+  MarketLevel market_level = 2;
+  OptionGreeks option_greeks = 3;
+  MarketOHLC market_ohlc = 4;
+  float vtt = 6;           // Volume traded today (total)
+  float atp = 7;           // Average traded price
+  float close = 8;         // Previous session close
+  float open = 9;          // Day open (for equities, when available)
+  float high = 10;         // Day high
+  float low = 11;          // Day low
+  float cp = 12;           // Previous close (alternate field)
+  float oi = 13;           // Open interest
+  float prev_oi = 14;      // Previous day open interest
+  float tbq = 15;          // Total buy quantity
+  float tsq = 16;          // Total sell quantity
+  float lcl = 17;          // Lower circuit limit
+  float ucl = 18;          // Upper circuit limit
+  float yh = 19;           // 52-week high
+  float yl = 20;           // 52-week low
+  CAS cas = 21;            // Call Auction Session fields (pre-open/post-close)
+}
+
+// Last Traded Price and Close
+message LTPC {
+  float ltp = 1;            // Last traded price
+  float ltt = 2;            // Last trade time (epoch ms)
+  float ltq = 3;            // Last traded quantity
+  float cp = 4;             // Previous close price
+}
+
+// Market depth — up to 5 bid/ask levels
+message MarketLevel {
+  repeated BidAskQuote bid_ask_quote = 1;
+}
+
+message BidAskQuote {
+  float bid_quantity = 1;
+  float bid_price = 2;
+  int32 bid_orders = 3;
+  float ask_quantity = 4;
+  float ask_price = 5;
+  int32 ask_orders = 6;
+}
+
+// Option Greeks
+message OptionGreeks {
+  float vega = 1;
+  float theta = 2;
+  float gamma = 3;
+  float delta = 4;
+  float iv = 5;
+  float rho = 6;
+}
+
+// OHLC candle data across multiple intervals
+message MarketOHLC {
+  repeated OHLC ohlc = 1;
+}
+
+message OHLC {
+  string interval = 1;   // "I1" = 1-day, "I1Minute" = 1-minute, etc.
+  float open = 2;
+  float high = 3;
+  float low = 4;
+  float close = 5;
+  int64 ts = 6;           // candle timestamp epoch ms
+  float vol = 7;
+}
+
+// Call Auction Session (pre-market/post-close)
+message CAS {
+  float indicative_eq_price = 1;
+  float indicative_eq_qty = 2;
+  float total_indicative_qty = 3;
+  float market_imbalance = 4;
+  float reference_price = 5;
+}

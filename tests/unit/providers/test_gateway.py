@@ -268,9 +268,11 @@ class TestGetProviderHealthStub:
 
 class TestFetchStub:
     @pytest.mark.asyncio
-    async def test_fetch_raises_not_implemented(self) -> None:
+    async def test_fetch_raises_unavailable_when_no_adapter(self) -> None:
+        # Gateway now raises DATA_SERVICE_UNAVAILABLE (RuntimeError) when the
+        # adapter is not configured — replacing the old NotImplementedError stub.
         gw = ProviderGateway()
-        with pytest.raises(NotImplementedError):
+        with pytest.raises((NotImplementedError, RuntimeError)):
             await gw.fetch(
                 ProviderId.ANGEL_ONE,
                 DataType.HISTORICAL_OHLCV,
@@ -281,7 +283,7 @@ class TestFetchStub:
     @pytest.mark.asyncio
     async def test_fetch_error_message_contains_provider(self) -> None:
         gw = ProviderGateway()
-        with pytest.raises(NotImplementedError, match="angel_one"):
+        with pytest.raises((NotImplementedError, RuntimeError), match="angel_one"):
             await gw.fetch(
                 ProviderId.ANGEL_ONE,
                 DataType.LIVE_QUOTE,

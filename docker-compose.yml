@@ -24,7 +24,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: data-service:2.0.0
+    image: data-service:2.1.0
     container_name: data-service-api
     restart: unless-stopped
     ports:
@@ -57,6 +57,15 @@ services:
       # ── Gap recovery ─────────────────────────────────────────────────────
       GAP_RECOVERY_MAX_ATTEMPTS: "${GAP_RECOVERY_MAX_ATTEMPTS:-5}"
 
+      # ── OHLCV catch-up worker ─────────────────────────────────────────────
+      CATCHUP_ENABLED: "${CATCHUP_ENABLED:-true}"
+      CATCHUP_CONCURRENCY: "${CATCHUP_CONCURRENCY:-2}"
+      CATCHUP_CHUNK_DELAY_S: "${CATCHUP_CHUNK_DELAY_S:-0.3}"
+      CATCHUP_EOD_HOUR_IST: "${CATCHUP_EOD_HOUR_IST:-17}"
+      CATCHUP_INTRADAY_INTERVAL_H: "${CATCHUP_INTRADAY_INTERVAL_H:-4}"
+      CATCHUP_INTERVALS_EOD: "${CATCHUP_INTERVALS_EOD:-1d,1w,1M}"
+      CATCHUP_INTERVALS_INTRADAY: "${CATCHUP_INTERVALS_INTRADAY:-1m,5m,10m,15m,30m,1h}"
+
       # ── Backfill chunk sizes ─────────────────────────────────────────────
       BACKFILL_CHUNK_ANGEL_1M_DAYS: "${BACKFILL_CHUNK_ANGEL_1M_DAYS:-30}"
       BACKFILL_CHUNK_ANGEL_5M_15M_DAYS: "${BACKFILL_CHUNK_ANGEL_5M_15M_DAYS:-90}"
@@ -83,6 +92,8 @@ services:
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+      UPSTOX_ACCESS_TOKEN: "${UPSTOX_ACCESS_TOKEN}"
+      UPSTOX_ANALYTICS_KEY: "${UPSTOX_ANALYTICS_KEY}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8200/v1/health/live"]
       interval: 10s
@@ -105,10 +116,14 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: data-service:2.0.0
+    image: data-service:2.1.0
     container_name: data-service-worker
     restart: unless-stopped
     command: ["python", "-m", "src.worker"]
+    # Worker runs no HTTP server — disable the image-level healthcheck that
+    # curls localhost:8200, which would always fail for a non-API process.
+    healthcheck:
+      disable: true
     depends_on:
       redis:
         condition: service_healthy
@@ -141,6 +156,8 @@ services:
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+      UPSTOX_ACCESS_TOKEN: "${UPSTOX_ACCESS_TOKEN}"
+      UPSTOX_ANALYTICS_KEY: "${UPSTOX_ANALYTICS_KEY}"
     networks:
       - data-service-net
     logging:
@@ -159,10 +176,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: data-service:2.0.0
+    image: data-service:2.1.0
     container_name: data-service-scheduler
     restart: unless-stopped
     command: ["python", "-m", "src.scheduler"]
+    # Scheduler runs no HTTP server — disable the image-level healthcheck.
+    healthcheck:
+      disable: true
     depends_on:
       redis:
         condition: service_healthy
@@ -188,6 +208,8 @@ services:
       UPSTOX_API_KEY: "${UPSTOX_API_KEY}"
       UPSTOX_API_SECRET: "${UPSTOX_API_SECRET}"
       UPSTOX_REDIRECT_URI: "${UPSTOX_REDIRECT_URI}"
+      UPSTOX_ACCESS_TOKEN: "${UPSTOX_ACCESS_TOKEN}"
+      UPSTOX_ANALYTICS_KEY: "${UPSTOX_ANALYTICS_KEY}"
     networks:
       - data-service-net
     logging:

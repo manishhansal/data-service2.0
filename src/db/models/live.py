@@ -27,6 +27,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.sqltypes import TIMESTAMP
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 from src.db.models.base import Base
 
@@ -35,7 +37,6 @@ _QUALITY_STATUS_CHECK = (
     "'TRUSTED','DEGRADED','POOR_QUALITY','BLOCKED','MISSING','QUARANTINED','DERIVED'"
     ")"
 )
-
 
 class MarketTick(Base):
     """Live WebSocket tick record.
@@ -49,11 +50,11 @@ class MarketTick(Base):
 
     __tablename__ = "market_tick"
 
-    tick_id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    tick_id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     exchange: Mapped[str] = mapped_column(String(8), nullable=False)
     timestamp: Mapped[datetime.datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
+        TIMESTAMP(timezone=True), nullable=False, primary_key=True,
         comment="Exchange-side tick timestamp — hypertable partition key",
     )
     received_at: Mapped[datetime.datetime] = mapped_column(
@@ -114,7 +115,6 @@ class MarketTick(Base):
     )
 
     __table_args__ = (
-        {"primary_key": (tick_id, timestamp)},
         CheckConstraint(_QUALITY_STATUS_CHECK, name="mt_quality_status_valid"),
         Index(
             "mt_instrument_timestamp",
@@ -128,7 +128,6 @@ class MarketTick(Base):
             f"ltp={self.ltp}>"
         )
 
-
 class MarketQuote(Base):
     """Live quote snapshot (REST polling or full-quote WebSocket message).
 
@@ -141,7 +140,7 @@ class MarketQuote(Base):
 
     __tablename__ = "market_quote"
 
-    quote_id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    quote_id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
     exchange: Mapped[str] = mapped_column(String(8), nullable=False)
     timestamp: Mapped[datetime.datetime] = mapped_column(
@@ -208,13 +207,37 @@ class MarketQuote(Base):
     session_date: Mapped[Optional[datetime.date]] = mapped_column(
         Date(), nullable=True
     )
+    # ── Added columns ─────────────────────────────────────────────────────
+    depth_json: Mapped[Optional[dict]] = mapped_column(
+        postgresql.JSONB(astext_type=sa.Text()), nullable=True,
+        comment="Market depth buy/sell levels serialised as JSON",
+    )
+    source_type: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True,
+        comment="BROKER_AUTHENTICATED | OPEN_SOURCE_NSE_DERIVED",
+    )
+    change: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Price change vs previous close",
+    )
+    change_pct: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=10, scale=4), nullable=True,
+        comment="Percentage change vs previous close",
+    )
+    avg_traded_price: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Average traded price (ATP)",
+    )
 
     __table_args__ = (
-        {"primary_key": (quote_id, timestamp)},
         CheckConstraint(_QUALITY_STATUS_CHECK, name="mq_quality_status_valid"),
         Index(
             "mq_instrument_timestamp",
             "instrument_id", text("timestamp DESC"),
+        ),
+        sa.UniqueConstraint(
+            "instrument_id", "exchange", "timestamp", "provider",
+            name="mq_instrument_exchange_ts_provider_uq",
         ),
     )
 

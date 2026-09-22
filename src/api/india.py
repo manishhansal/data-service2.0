@@ -1056,6 +1056,12 @@ class BackfillRequest(_BaseModel):
     from_date: str
     to_date: Optional[str] = None
     instrument_class: str = "EQ"
+    # force=True bypasses the Redis checkpoint so historical windows
+    # blocked by a newer checkpoint are re-fetched in full.
+    force: bool = False
+    # TEST-ONLY: forces a specific provider ("angel_one", "upstox",
+    # "yahoo_finance").  Has no effect on production routing.
+    force_provider: Optional[str] = None
 
     @_field_validator("interval")
     @classmethod
@@ -1163,6 +1169,8 @@ async def trigger_backfill(
         "completedAt": None,
         "result": None,
         "error": None,
+        "force": body.force,
+        "forceProvider": body.force_provider,
     }
     _backfill_jobs[job_id] = job_record
 
@@ -1183,6 +1191,8 @@ async def trigger_backfill(
             to_dt=to_dt,
             db_engine=db_engine,
             redis_client=redis_client,
+            force=body.force,
+            force_provider=body.force_provider,
         )
     )
 
@@ -1269,6 +1279,8 @@ async def _run_backfill_job(
     to_dt: datetime,
     db_engine: Any,
     redis_client: Any,
+    force: bool = False,
+    force_provider: Optional[str] = None,
 ) -> None:
     """Execute the backfill job and update the job record on completion.
 
@@ -1289,6 +1301,25 @@ async def _run_backfill_job(
     job["startedAt"] = _utc_iso_now()
 
     try:
+        from src.core.schemas.provider import ProviderId  # noqa: PLC0415
+        _provider_override = None
+        if force_provider:
+            _fp = force_provider.lower().strip()
+            _provider_map = {
+                "angel_one": ProviderId.ANGEL_ONE,
+                "upstox":    ProviderId.UPSTOX,
+                "yahoo_finance": ProviderId.YAHOO_FINANCE,
+            }
+            _provider_override = _provider_map.get(_fp)
+        # When force=True, clear the checkpoint so the full range is
+        # re-fetched regardless of any existing checkpoint in Redis.
+        if force and redis_client is not None:
+            await hist_engine.clear_checkpoint(
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                redis_client=redis_client,
+            )
         result = await hist_engine.run_backfill(
             symbol=symbol,
             exchange=exchange,
@@ -1299,6 +1330,7 @@ async def _run_backfill_job(
             db_engine=db_engine,
             redis_client=redis_client,
             is_indian_market=True,
+            provider=_provider_override,
         )
         job["status"] = "COMPLETED"
         job["result"] = result
@@ -1349,9 +1381,7 @@ async def _query_candles(
     # When futures_candle and options_candle are populated, the router will
     # use exchange/instrument_class to select the right table.
     if exchange.upper() in ("NFO", "BFO"):
-        # F&O instruments — query futures_candle first, fall back to options_candle
-        # if the instrument has a strike (options). For now, since F&O data
-        # has not yet been backfilled, we query futures_candle.
+        # F&O instruments — query futures_candle first
         select_sql = text(
             """
             SELECT
@@ -1359,7 +1389,7 @@ async def _query_candles(
                 open, high, low, close, volume,
                 open_interest AS oi,
                 FALSE AS volume_unavailable,
-                provider, poor_quality,
+                provider, source_type, poor_quality,
                 normalisation_version, session_date
             FROM futures_candle
             WHERE instrument_id = :instrument_id
@@ -1374,13 +1404,15 @@ async def _query_candles(
         )
     else:
         # NSE/BSE equities and indices → equity_candle
+        # NOTE: equity_candle has no open_interest column (equities have no OI).
+        # Index instruments (NIFTY, BANKNIFTY) also have no OI in candle data.
         select_sql = text(
             """
             SELECT
                 EXTRACT(EPOCH FROM time)::bigint AS time_epoch,
                 open, high, low, close, volume,
                 NULL::bigint AS oi,
-                volume_unavailable, provider, poor_quality,
+                volume_unavailable, provider, source_type, poor_quality,
                 normalisation_version, session_date
             FROM equity_candle
             WHERE instrument_id = :instrument_id
@@ -1436,6 +1468,8 @@ async def _query_candles(
                 "volume": int(row.volume),
                 "oi": int(row.oi) if row.oi is not None else None,
                 "volumeUnavailable": bool(row.volume_unavailable),
+                "provider": str(row.provider),
+                "sourceType": str(row.source_type) if row.source_type else None,
             }
         )
 
@@ -1474,3 +1508,597 @@ def _parse_iso_datetime(value: str) -> datetime:
         return dt.astimezone(timezone.utc)
     except ValueError:
         raise ValueError(f"Cannot parse datetime: {value!r}")
+
+
+# ---------------------------------------------------------------------------
+# Persistence helpers — option_greeks_snapshot
+# ---------------------------------------------------------------------------
+
+
+async def _persist_option_greeks(
+    greeks_map: dict[str, Any],
+    *,
+    db_engine: Any,
+    received_at: str,
+) -> None:
+    """Persist a batch of normalised option Greeks to ``option_greeks_snapshot``.
+
+    Called fire-and-forget from the Greeks REST endpoint.
+    Silently logs and returns on any DB error.
+
+    Args:
+        greeks_map:   Dict of {instrument_key → normalized_greeks_dict}.
+        db_engine:    Async SQLAlchemy engine.
+        received_at:  UTC ISO-8601 timestamp of the fetch.
+    """
+    if not db_engine or not greeks_map:
+        return
+
+    from sqlalchemy import text as _text  # noqa: PLC0415
+    import datetime as _dt  # noqa: PLC0415
+
+    try:
+        ts = _dt.datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_dt.timezone.utc)
+    except (ValueError, AttributeError):
+        ts = _dt.datetime.now(_dt.timezone.utc)
+
+    session_date = ts.astimezone(
+        _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+    ).date()
+
+    upsert_sql = _text(
+        """
+        INSERT INTO option_greeks_snapshot (
+            instrument_id, instrument_key, timestamp, session_date,
+            ltp, option_price, prev_close,
+            oi, volume, ltq,
+            iv, delta, gamma, theta, vega, rho,
+            calculation_method, provider, received_at, quality_status
+        ) VALUES (
+            :instrument_id, :instrument_key, :timestamp, :session_date,
+            :ltp, :ltp, :prev_close,
+            :oi, :volume, :ltq,
+            :iv, :delta, :gamma, :theta, :vega, :rho,
+            'PROVIDER', :provider, :received_at, 'TRUSTED'
+        )
+        ON CONFLICT DO NOTHING
+        """
+    )
+
+    rows = []
+    for key, g in greeks_map.items():
+        if not g:
+            continue
+        oi_val = g.get("oi") if not g.get("oiMissing", True) else None
+        rows.append({
+            "instrument_id":   g.get("instrumentId") or key,
+            "instrument_key":  key,
+            "timestamp":       ts,
+            "session_date":    session_date,
+            "ltp":             g.get("ltp"),
+            "prev_close":      g.get("prevClose"),
+            "oi":              oi_val,
+            "volume":          g.get("volume"),
+            "ltq":             g.get("lastTradeQty"),
+            "iv":              g.get("iv"),
+            "delta":           g.get("delta"),
+            "gamma":           g.get("gamma"),
+            "theta":           g.get("theta"),
+            "vega":            g.get("vega"),
+            "rho":             g.get("rho"),
+            "provider":        g.get("provider") or "upstox",
+            "received_at":     ts,
+        })
+
+    if not rows:
+        return
+
+    try:
+        async with db_engine.begin() as conn:
+            for row in rows:
+                await conn.execute(upsert_sql, row)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "option_greeks_persist_failed",
+            component="india_api",
+            count=len(rows),
+            error=str(exc),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for DualProviderEngine
+# ---------------------------------------------------------------------------
+
+
+def _get_dual_engine(request: Request):  # type: ignore[return]
+    """Resolve the DualProviderEngine from app state, or create a stub."""
+    engine = getattr(request.app.state, "dual_provider_engine", None)
+    if engine is None:
+        from src.engines.dual_provider_engine import DualProviderEngine  # noqa: PLC0415
+        engine = DualProviderEngine()
+        request.app.state.dual_provider_engine = engine
+    return engine
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/india/options/greeks — batch option Greeks from Upstox V3
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/india/options/greeks",
+    summary="Option Greeks for a batch of instruments",
+    description=(
+        "Fetch IV, delta, gamma, theta, vega and OI for up to 50 F&O "
+        "instruments via Upstox V3 /v3/market-quote/option-greek. "
+        "Zero IV is never returned — it is treated as missing. "
+        "Greeks are tagged with greekSource=PROVIDER to distinguish them "
+        "from internally calculated values."
+    ),
+    response_class=Response,
+)
+async def get_option_greeks(
+    request: Request,
+    instrument_keys: Annotated[
+        str,
+        Query(
+            description=(
+                "Comma-separated Upstox instrument keys for option contracts. "
+                "Maximum 50 per request. "
+                "Example: NSE_FO|43985,NSE_FO|43986"
+            )
+        ),
+    ] = "",
+) -> Response:
+    """Fetch option Greeks for a batch of instruments.
+
+    Returns IV, delta, gamma, theta, vega, OI and volume.
+    greekSource=PROVIDER means the values came directly from the provider,
+    not from any internal calculation.
+    """
+    if not instrument_keys.strip():
+        return _json_response(
+            _error_envelope("MISSING_PARAMETER", "instrument_keys is required"),
+            status_code=400,
+        )
+
+    keys = [k.strip() for k in instrument_keys.split(",") if k.strip()]
+    if len(keys) > 50:
+        return _json_response(
+            _error_envelope(
+                "PARAMETER_ERROR",
+                f"Maximum 50 instrument_keys per request; got {len(keys)}",
+            ),
+            status_code=400,
+        )
+
+    upstox_adapter = getattr(request.app.state, "upstox_adapter", None)
+    if upstox_adapter is None:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_UNAVAILABLE",
+                "Upstox adapter not configured; option Greeks unavailable",
+                provider="upstox",
+            ),
+            status_code=503,
+        )
+
+    from src.core.normalizers.upstox import UpstoxNormalizer  # noqa: PLC0415
+    from src.core.normalizers.freshness import FreshnessClassifier  # noqa: PLC0415
+
+    norm = UpstoxNormalizer()
+    freshness = FreshnessClassifier()
+    received_at = _utc_iso_now()
+
+    try:
+        raw_greeks = await upstox_adapter.fetch_option_greeks_batched(
+            instrument_keys=keys, batch_size=50
+        )
+    except Exception as exc:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_ERROR",
+                f"Failed to fetch option Greeks: {type(exc).__name__}",
+                provider="upstox",
+            ),
+            status_code=502,
+        )
+
+    results: dict[str, Any] = {}
+    for key, raw in raw_greeks.items():
+        normalized = norm.normalize_option_greek(
+            instrument_key=key,
+            raw=raw,
+            instrument_id=key,
+            received_at=received_at,
+        )
+        if normalized:
+            freshness.classify(normalized)
+            results[key] = normalized
+
+    # Persist Greeks to option_greeks_snapshot (fire-and-forget)
+    db_engine = getattr(request.app.state, "db_engine", None)
+    if db_engine is not None and results:
+        import asyncio as _asyncio  # noqa: PLC0415
+        _asyncio.ensure_future(
+            _persist_option_greeks(results, db_engine=db_engine, received_at=received_at)
+        )
+
+    return _json_response(
+        _success_envelope(
+            data=results,
+            data_as_of=received_at,
+            provider="upstox",
+            data_source_type="LIVE",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/india/market/exchange-status — exchange trading status
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/india/market/exchange-status",
+    summary="Current exchange trading status",
+    description=(
+        "Returns the current trading status for NSE, BSE, or MCX from "
+        "Upstox GET /v2/market/status/{exchange}. "
+        "Status values: NORMAL_OPEN, PRE_OPEN, CLOSED, HOLIDAY, etc."
+    ),
+    response_class=Response,
+)
+async def get_exchange_status(
+    request: Request,
+    exchange: Annotated[
+        str,
+        Query(description="Exchange code: NSE, BSE, or MCX"),
+    ] = "NSE",
+) -> Response:
+    """Return the current trading status for an exchange from Upstox."""
+    valid_exchanges = {"NSE", "BSE", "MCX"}
+    if exchange.upper() not in valid_exchanges:
+        return _json_response(
+            _error_envelope(
+                "INVALID_EXCHANGE",
+                f"exchange must be one of {sorted(valid_exchanges)}; got {exchange!r}",
+            ),
+            status_code=400,
+        )
+
+    upstox_adapter = getattr(request.app.state, "upstox_adapter", None)
+    if upstox_adapter is None:
+        # Fall back to MarketSessionEngine-derived status
+        session_engine = _get_session_engine(request)
+        phase = session_engine.get_current_phase()
+        return _json_response(
+            _success_envelope(
+                data={
+                    "exchange": exchange.upper(),
+                    "status": phase.value,
+                    "source": "session_engine_fallback",
+                },
+                data_source_type="DERIVED",
+            )
+        )
+
+    try:
+        status_data = await upstox_adapter.fetch_exchange_status(exchange.upper())
+    except Exception as exc:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_ERROR",
+                f"Exchange status fetch failed: {type(exc).__name__}",
+                provider="upstox",
+            ),
+            status_code=502,
+        )
+
+    return _json_response(
+        _success_envelope(
+            data=status_data,
+            data_as_of=_utc_iso_now(),
+            provider="upstox",
+            data_source_type="LIVE",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/india/market/holidays — market holiday schedule
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/india/market/holidays",
+    summary="Market holiday schedule",
+    description=(
+        "Returns NSE/BSE/MCX market holiday schedule from "
+        "Upstox GET /v2/market/holidays."
+    ),
+    response_class=Response,
+)
+async def get_market_holidays(request: Request) -> Response:
+    """Return the market holiday schedule from Upstox."""
+    upstox_adapter = getattr(request.app.state, "upstox_adapter", None)
+    if upstox_adapter is None:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_UNAVAILABLE",
+                "Upstox adapter not configured; holiday data unavailable",
+                provider="upstox",
+            ),
+            status_code=503,
+        )
+
+    try:
+        holidays = await upstox_adapter.fetch_market_holidays()
+    except Exception as exc:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_ERROR",
+                f"Market holidays fetch failed: {type(exc).__name__}",
+                provider="upstox",
+            ),
+            status_code=502,
+        )
+
+    return _json_response(
+        _success_envelope(
+            data=holidays,
+            data_as_of=_utc_iso_now(),
+            provider="upstox",
+            data_source_type="REFERENCE",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/india/historical/oi — historical open interest time-series
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/india/historical/oi",
+    summary="Historical Open Interest time-series",
+    description=(
+        "Fetch historical OI time-series for a derivative instrument "
+        "from Angel One SmartAPI getOIData endpoint. "
+        "OI is NEVER populated from tradedValue — only from the dedicated "
+        "OI field. Missing OI is represented as null, not zero."
+    ),
+    response_class=Response,
+)
+async def get_historical_oi(
+    request: Request,
+    symbol: Annotated[str, Query(description="Angel One trading symbol")] = "",
+    token: Annotated[str, Query(description="Angel One instrument token")] = "",
+    from_date: Annotated[
+        str, Query(alias="from", description="Start datetime YYYY-MM-DD HH:MM (IST)")
+    ] = "",
+    to_date: Annotated[
+        str, Query(alias="to", description="End datetime YYYY-MM-DD HH:MM (IST)")
+    ] = "",
+    interval: Annotated[
+        str, Query(description="Canonical interval: 1m,5m,10m,15m,30m,1h,1d")
+    ] = "1d",
+    exchange: Annotated[str, Query(description="Exchange: NFO or MCX")] = "NFO",
+) -> Response:
+    """Fetch historical OI from Angel One for a derivative instrument."""
+    if not symbol or not token or not from_date or not to_date:
+        return _json_response(
+            _error_envelope(
+                "MISSING_PARAMETER",
+                "symbol, token, from, and to are required",
+            ),
+            status_code=400,
+        )
+
+    angel_adapter = getattr(request.app.state, "angel_one_adapter", None)
+    if angel_adapter is None:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_UNAVAILABLE",
+                "Angel One adapter not configured; historical OI unavailable",
+                provider="angel_one",
+            ),
+            status_code=503,
+        )
+
+    from src.core.normalizers.angel_one import AngelOneNormalizer  # noqa: PLC0415
+    norm = AngelOneNormalizer()
+
+    try:
+        raw_records = await angel_adapter.fetch_historical_oi(
+            symbol=symbol,
+            token=token,
+            from_date=from_date,
+            to_date=to_date,
+            interval=interval,
+            exchange=exchange,
+        )
+    except Exception as exc:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_ERROR",
+                f"Historical OI fetch failed: {type(exc).__name__}",
+                provider="angel_one",
+            ),
+            status_code=502,
+        )
+
+    normalized: list[dict[str, Any]] = []
+    for record in raw_records:
+        n = norm.normalize_oi_record(
+            raw_record=record,
+            instrument_id=f"{exchange}:{symbol}",
+            exchange=exchange,
+            interval=interval,
+        )
+        if n:
+            normalized.append(n)
+
+    return _json_response(
+        _success_envelope(
+            data={
+                "records": normalized,
+                "count": len(normalized),
+                "symbol": symbol,
+                "exchange": exchange,
+                "interval": interval,
+                "from": from_date,
+                "to": to_date,
+                "oiSemantic": "NULL_WHEN_MISSING_NEVER_ZERO",
+            },
+            provider="angel_one",
+            data_source_type="HISTORICAL",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/india/historical/intraday — intraday candles (current session)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/india/historical/intraday",
+    summary="Intraday candles for current session",
+    description=(
+        "Fetch OHLCV candles for the current trading session only from "
+        "Upstox V3 /v3/historical-candle/intraday endpoint. "
+        "The last candle may be incomplete (ongoing candle). "
+        "OI is included for derivative instruments (index 6 in V3 response)."
+    ),
+    response_class=Response,
+)
+async def get_intraday_candles(
+    request: Request,
+    instrument_key: Annotated[
+        str,
+        Query(description="Upstox instrument key, e.g. NSE_EQ|INE002A01018"),
+    ] = "",
+    interval: Annotated[
+        str,
+        Query(description="Canonical interval: 1m, 5m, 10m, 15m, 30m, 1h"),
+    ] = "1m",
+    exchange: Annotated[str, Query(description="Exchange code")] = "NSE",
+) -> Response:
+    """Fetch intraday OHLCV candles for the current session from Upstox V3."""
+    if not instrument_key.strip():
+        return _json_response(
+            _error_envelope("MISSING_PARAMETER", "instrument_key is required"),
+            status_code=400,
+        )
+
+    valid_intervals = {"1m", "5m", "10m", "15m", "30m", "1h"}
+    if interval not in valid_intervals:
+        return _json_response(
+            _error_envelope(
+                "INVALID_INTERVAL",
+                f"interval must be one of {sorted(valid_intervals)} for intraday; got {interval!r}",
+            ),
+            status_code=400,
+        )
+
+    upstox_adapter = getattr(request.app.state, "upstox_adapter", None)
+    if upstox_adapter is None:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_UNAVAILABLE",
+                "Upstox adapter not configured; intraday candles unavailable",
+                provider="upstox",
+            ),
+            status_code=503,
+        )
+
+    from src.core.normalizers.upstox import UpstoxNormalizer  # noqa: PLC0415
+    norm = UpstoxNormalizer()
+
+    try:
+        raw_candles = await upstox_adapter.fetch_intraday_candles(
+            instrument_key=instrument_key.strip(),
+            interval=interval,
+        )
+    except Exception as exc:
+        return _json_response(
+            _error_envelope(
+                "PROVIDER_ERROR",
+                f"Intraday candles fetch failed: {type(exc).__name__}",
+                provider="upstox",
+            ),
+            status_code=502,
+        )
+
+    normalized: list[dict[str, Any]] = []
+    for raw_candle in raw_candles:
+        n = norm.normalize_candle(
+            raw_candle=raw_candle,
+            instrument_id=instrument_key.strip(),
+            exchange=exchange,
+            interval=interval,
+        )
+        if n:
+            # Preserve is_complete flag from adapter
+            n["isComplete"] = raw_candle.get("is_complete", True)
+            normalized.append(n)
+
+    return _json_response(
+        _success_envelope(
+            data={
+                "candles": normalized,
+                "count": len(normalized),
+                "instrumentKey": instrument_key,
+                "interval": interval,
+                "exchange": exchange,
+                "sessionType": "INTRADAY",
+                "oiIncluded": True,
+                "apiVersion": "upstox_v3",
+            },
+            data_as_of=_utc_iso_now(),
+            provider="upstox",
+            data_source_type="LIVE",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/india/providers/capabilities — current capability matrix
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/india/providers/capabilities",
+    summary="Current provider capability matrix",
+    description=(
+        "Returns the current provider capability matrix showing which data "
+        "types each provider supports, their rate limits, and routing priority."
+    ),
+    response_class=Response,
+)
+async def get_provider_capabilities(request: Request) -> Response:
+    """Return the current provider capability matrix."""
+    from src.providers.capability_matrix import _MATRIX  # noqa: PLC0415
+    caps = [
+        {
+            "provider":           c.provider.value,
+            "dataType":           c.dataType.value,
+            "instrumentClass":    c.instrumentClass,
+            "supported":          c.supported,
+            "liveSupported":      c.liveSupported,
+            "historySupported":   c.historySupported,
+            "maxChunkDays":       c.maxChunkDays,
+            "requestsPerSecond":  c.requestsPerSecond,
+            "intervalSupport":    c.intervalSupport,
+            "sourceType":         c.sourceType.value,
+            "priority":           c.priority,
+        }
+        for c in _MATRIX
+    ]
+    return _json_response(
+        _success_envelope(data={"capabilities": caps, "count": len(caps)})
+    )

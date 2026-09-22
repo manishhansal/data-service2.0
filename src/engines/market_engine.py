@@ -85,6 +85,157 @@ _NORMALISATION_VERSION: str = "2.0.0"
 
 
 # ---------------------------------------------------------------------------
+# Persistence helper — writes a normalised quote to market_quote table
+# ---------------------------------------------------------------------------
+
+async def persist_market_quote(
+    quote: dict[str, Any],
+    *,
+    db_engine: Any,
+    instrument_id: str,
+    exchange: str,
+) -> None:
+    """Persist a normalised live quote to the ``market_quote`` table.
+
+    Called fire-and-forget after each successful live quote fetch so that
+    ``market_quote`` holds the latest snapshot per instrument.  Uses ON
+    CONFLICT DO UPDATE so repeated calls for the same (instrument, exchange,
+    timestamp) are idempotent.
+
+    Silently logs and returns on any DB error — quote serving must never
+    fail because of a persistence write.
+
+    Args:
+        quote:         Normalised quote dict (output of any quote normalizer).
+        db_engine:     Async SQLAlchemy engine from ``app.state.db_engine``.
+        instrument_id: Canonical instrument ID, e.g. ``"NSE:RELIANCE"``.
+        exchange:      Exchange code, e.g. ``"NSE"``.
+    """
+    if db_engine is None:
+        return
+
+    import json as _json  # noqa: PLC0415
+    from sqlalchemy import text as _text  # noqa: PLC0415
+    import datetime as _dt  # noqa: PLC0415
+
+    # Use received_at as the row timestamp when no exchange source timestamp
+    received_at_str = quote.get("receivedAt") or quote.get("received_at")
+    try:
+        if received_at_str:
+            ts = _dt.datetime.fromisoformat(received_at_str.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_dt.timezone.utc)
+        else:
+            ts = _dt.datetime.now(_dt.timezone.utc)
+    except (ValueError, AttributeError):
+        ts = _dt.datetime.now(_dt.timezone.utc)
+
+    # source_timestamp — optional exchange-side timestamp
+    source_ts_str = quote.get("sourceTimestamp")
+    source_ts = None
+    if source_ts_str:
+        try:
+            source_ts = _dt.datetime.fromisoformat(str(source_ts_str).replace("Z", "+00:00"))
+            if source_ts.tzinfo is None:
+                source_ts = source_ts.replace(tzinfo=_dt.timezone.utc)
+        except (ValueError, AttributeError):
+            source_ts = None
+
+    session_date = ts.astimezone(
+        _dt.timezone(
+            _dt.timedelta(hours=5, minutes=30)
+        )
+    ).date()
+
+    # Depth — serialise to JSONB
+    depth_buy  = quote.get("depthBuy")  or []
+    depth_sell = quote.get("depthSell") or []
+    depth_json = _json.dumps({"buy": depth_buy, "sell": depth_sell})
+
+    row = {
+        "instrument_id":       instrument_id,
+        "exchange":            exchange.upper(),
+        "timestamp":           ts,
+        "ltp":                 quote.get("ltp"),
+        "ltq":                 quote.get("lastTradeQty"),
+        "open":                quote.get("open"),
+        "high":                quote.get("high"),
+        "low":                 quote.get("low"),
+        "close":               quote.get("prevClose"),
+        "volume":              quote.get("volume"),
+        "open_interest":       quote.get("oi") if not quote.get("oiMissing", True) else None,
+        "bid":                 quote.get("bid"),
+        "ask":                 quote.get("ask"),
+        "bid_quantity":        quote.get("bidQty"),
+        "ask_quantity":        quote.get("askQty"),
+        "total_buy_quantity":  quote.get("totalBuyQty"),
+        "total_sell_quantity": quote.get("totalSellQty"),
+        "upper_circuit":       quote.get("upperCircuit"),
+        "lower_circuit":       quote.get("lowerCircuit"),
+        "week_high_52":        quote.get("weekHigh52"),
+        "week_low_52":         quote.get("weekLow52"),
+        "provider":            quote.get("provider") or "unknown",
+        "source_timestamp":    source_ts,
+        "session_date":        session_date,
+        "depth_json":          depth_json,
+    }
+
+    upsert_sql = _text(
+        """
+        INSERT INTO market_quote (
+            instrument_id, exchange, timestamp,
+            ltp, ltq, open, high, low, close, volume, open_interest,
+            bid, ask, bid_quantity, ask_quantity,
+            total_buy_quantity, total_sell_quantity,
+            upper_circuit, lower_circuit, week_high_52, week_low_52,
+            provider, source_timestamp, session_date,
+            depth_json, quality_status
+        ) VALUES (
+            :instrument_id, :exchange, :timestamp,
+            :ltp, :ltq, :open, :high, :low, :close, :volume, :open_interest,
+            :bid, :ask, :bid_quantity, :ask_quantity,
+            :total_buy_quantity, :total_sell_quantity,
+            :upper_circuit, :lower_circuit, :week_high_52, :week_low_52,
+            :provider, :source_timestamp, :session_date,
+            CAST(:depth_json AS jsonb), 'TRUSTED'
+        )
+        ON CONFLICT (instrument_id, exchange, timestamp, provider)
+        DO UPDATE SET
+            ltp                  = EXCLUDED.ltp,
+            ltq                  = EXCLUDED.ltq,
+            open                 = EXCLUDED.open,
+            high                 = EXCLUDED.high,
+            low                  = EXCLUDED.low,
+            close                = EXCLUDED.close,
+            volume               = EXCLUDED.volume,
+            open_interest        = EXCLUDED.open_interest,
+            bid                  = EXCLUDED.bid,
+            ask                  = EXCLUDED.ask,
+            bid_quantity         = EXCLUDED.bid_quantity,
+            ask_quantity         = EXCLUDED.ask_quantity,
+            total_buy_quantity   = EXCLUDED.total_buy_quantity,
+            total_sell_quantity  = EXCLUDED.total_sell_quantity,
+            upper_circuit        = EXCLUDED.upper_circuit,
+            lower_circuit        = EXCLUDED.lower_circuit,
+            week_high_52         = EXCLUDED.week_high_52,
+            week_low_52          = EXCLUDED.week_low_52,
+            depth_json           = EXCLUDED.depth_json
+        """
+    )
+
+    try:
+        async with db_engine.begin() as conn:
+            await conn.execute(upsert_sql, row)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "market_quote_persist_failed",
+            component="market_engine",
+            instrument_id=instrument_id,
+            error=str(exc),
+        )
+
+
+# ---------------------------------------------------------------------------
 # MarketEngine
 # ---------------------------------------------------------------------------
 
@@ -109,6 +260,7 @@ class MarketEngine:
         holiday_calendar: Optional[HolidayCalendar] = None,
         normaliser: Optional[Normaliser] = None,
         angel_one_adapter: Optional[Any] = None,
+        instrument_master: Optional[Any] = None,
     ) -> None:
         """Initialise the Market Engine.
 
@@ -125,6 +277,11 @@ class MarketEngine:
                 provided, live quotes and option chains are served from real
                 Angel One SmartAPI instead of the Phase-8 stub.  When
                 ``None`` the engine degrades to returning stub (null) values.
+            instrument_master: Optional ``InstrumentMasterService`` instance.
+                When provided, canonical instrument IDs are resolved to
+                provider-specific numeric tokens before calling the adapter.
+                Without it, live quote calls using symbol names will fail
+                with HTTP 400 from Angel One.
         """
         # Resolve holiday calendar
         if holiday_calendar is None:
@@ -148,12 +305,43 @@ class MarketEngine:
         # Angel One adapter for live data — None means stub mode
         self._angel_one: Optional[Any] = angel_one_adapter
 
+        # InstrumentMasterService — resolves canonical IDs to numeric tokens
+        self._instrument_master: Optional[Any] = instrument_master
+
+        # DB engine — used for fire-and-forget market_quote persistence
+        self._db_engine: Optional[Any] = None
+
         # In-memory last-known-quote store keyed by "<exchange>:<instrumentId>"
         self._quote_cache: dict[str, dict] = {}
 
         # In-memory last-known spot-price store for option chain staleness check
         # keyed by "<exchange>:<underlying>", value: {"price": float, "ts_sec": float}
         self._spot_cache: dict[str, dict] = {}
+
+    # ------------------------------------------------------------------
+    # Public: instrument master injection
+    # ------------------------------------------------------------------
+
+    def set_instrument_master(self, instrument_master: Any) -> None:
+        """Inject or replace the InstrumentMasterService after construction.
+
+        The server lifespan initialises MarketEngine before InstrumentMasterService
+        finishes loading (the DB query can take a second). This setter lets the
+        lifespan handler attach the service once it is ready without requiring a
+        different construction order.
+
+        Args:
+            instrument_master: A loaded ``InstrumentMasterService`` instance.
+        """
+        self._instrument_master = instrument_master
+
+    def set_db_engine(self, db_engine: Any) -> None:
+        """Inject the async DB engine for market_quote persistence.
+
+        Args:
+            db_engine: Async SQLAlchemy engine from ``app.state.db_engine``.
+        """
+        self._db_engine = db_engine
 
     # ------------------------------------------------------------------
     # Public: session
@@ -231,11 +419,24 @@ class MarketEngine:
             normalised["marketStatus"] = phase.value
             normalised["provenance"] = _build_provenance(instrument_id, raw.get("provider", "angel_one" if self._angel_one else "stub"))
 
-            # Update cache
+            # Update in-memory cache
             self._quote_cache[cache_key] = {
                 "quote": normalised,
                 "ts_sec": now_sec,
             }
+
+            # Persist to market_quote table (fire-and-forget — never blocks the response)
+            db_engine = getattr(self, "_db_engine", None)
+            if db_engine is not None and normalised.get("ltp") is not None:
+                import asyncio as _asyncio  # noqa: PLC0415
+                _asyncio.ensure_future(
+                    persist_market_quote(
+                        normalised,
+                        db_engine=db_engine,
+                        instrument_id=instrument_id,
+                        exchange=exchange,
+                    )
+                )
 
             return normalised
 
@@ -435,40 +636,70 @@ class MarketEngine:
         """
         if self._angel_one is not None:
             try:
-                # Attempt a real Angel One SmartAPI quote fetch.
-                # fetch_live_quote returns a list of quotes; take first.
-                raw_quotes = await self._angel_one.fetch_live_quote(
-                    [instrument_id], exchange=exchange
-                )
-                if raw_quotes:
-                    q = raw_quotes[0]
-                    # Normalise keys to what the Normaliser expects
-                    return {
-                        "instrumentId": instrument_id,
-                        "symbol": q.get("tradingSymbol", instrument_id),
-                        "exchange": exchange,
-                        "ltp": q.get("ltp"),
-                        "open": q.get("open"),
-                        "high": q.get("high"),
-                        "low": q.get("low"),
-                        "prevClose": q.get("close"),
-                        "change": q.get("netChange"),
-                        "changePct": q.get("percentChange"),
-                        "volume": q.get("tradeVolume"),
-                        "oi": q.get("openInterest"),
-                        "tradedValue": None,
-                        "totalBuyQty": q.get("totBuyQuan"),
-                        "totalSellQty": q.get("totSellQuan"),
-                        "upperCircuit": q.get("upperCircuit"),
-                        "lowerCircuit": q.get("lowerCircuit"),
-                        "weekHigh52": q.get("52WeekHigh"),
-                        "weekLow52": q.get("52WeekLow"),
-                        "lastTradeTime": None,
-                        "bid": None,
-                        "ask": None,
-                        "marketStatus": "REGULAR",
-                        "provider": "angel_one",
-                    }
+                # ── Token resolution ──────────────────────────────────────
+                # Angel One's quote API requires a numeric exchange token
+                # (e.g. "2885"), not a symbol name.  Resolve the token from
+                # InstrumentMasterService when available; otherwise skip the
+                # live call rather than sending an invalid token that causes
+                # HTTP 400 from Angel One.
+                angel_token: Optional[str] = None
+
+                if self._instrument_master is not None:
+                    # The InstrumentMasterService keys by canonical instrument_id
+                    # (e.g. "NSE:RELIANCE"). Build the lookup key from the
+                    # symbol and exchange passed to this method.
+                    canonical_id = instrument_id
+                    if ":" not in instrument_id:
+                        # Plain symbol — prefix with exchange
+                        canonical_id = f"{exchange}:{instrument_id}"
+                    provider_tokens = self._instrument_master.resolve_provider_tokens(
+                        canonical_id, "angel_one"
+                    )
+                    angel_token = provider_tokens.get("angelToken")
+
+                if angel_token is None:
+                    # No numeric token available — fall through to stub.
+                    # Passing a symbol string to Angel One returns HTTP 400.
+                    logger.debug(
+                        "market_engine_angel_token_not_resolved",
+                        component="market_engine",
+                        instrument_id=instrument_id,
+                        reason="instrument_master_miss_or_not_loaded",
+                    )
+                else:
+                    # Attempt a real Angel One SmartAPI quote fetch.
+                    raw_quote = await self._angel_one.fetch_live_quote(
+                        angel_token, exchange=exchange
+                    )
+                    if raw_quote:
+                        q = raw_quote
+                        # Normalise keys to what the Normaliser expects
+                        return {
+                            "instrumentId": instrument_id,
+                            "symbol": q.get("tradingSymbol", instrument_id),
+                            "exchange": exchange,
+                            "ltp": q.get("ltp"),
+                            "open": q.get("open"),
+                            "high": q.get("high"),
+                            "low": q.get("low"),
+                            "prevClose": q.get("close"),
+                            "change": q.get("netChange"),
+                            "changePct": q.get("percentChange"),
+                            "volume": q.get("tradeVolume"),
+                            "oi": q.get("opnInterest"),
+                            "tradedValue": None,
+                            "totalBuyQty": q.get("totBuyQtn"),
+                            "totalSellQty": q.get("totSellQtn"),
+                            "upperCircuit": q.get("upperCircuit"),
+                            "lowerCircuit": q.get("lowerCircuit"),
+                            "weekHigh52": q.get("yearHigh"),
+                            "weekLow52": q.get("yearLow"),
+                            "lastTradeTime": q.get("exchTradeTime"),
+                            "bid": None,
+                            "ask": None,
+                            "marketStatus": "REGULAR",
+                            "provider": "angel_one",
+                        }
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "market_engine_angel_quote_failed",

@@ -1,8 +1,9 @@
 # DATA-SERVICE 2.0 — Complete Technical Guide
 
-> **Version:** 2.0.0 · **Port:** 8200 · **Language:** Python 3.11+  
+> **Version:** 2.1.0 · **Port:** 8200 · **Language:** Python 3.11+  
 > This is the authoritative internal reference for DATA-SERVICE 2.0.  
 > For the AlphaForge integration contract see [`ALPHAFORGE_DATA_REQUIREMENTS.md`](../ALPHAFORGE_DATA_REQUIREMENTS.md).  
+> **Last updated:** 2026-09-17 — Upstox V3 migration; persistence gaps fixed; 4,413 unit tests  
 > For production-readiness certification see [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](../reports/20_FINAL_PRODUCTION_CERTIFICATION.md).  
 > For system architecture see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).  
 > ⚠️ `PRODUCTION_CERTIFICATION.md` in the repo root has been **revoked** — refer to `reports/20_FINAL_PRODUCTION_CERTIFICATION.md` instead.

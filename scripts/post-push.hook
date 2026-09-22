@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# =============================================================================
+# .git/hooks/post-push
+#
+# Fires automatically after every successful `git push`.
+# Delegates to scripts/deploy.sh which handles branch guarding,
+# Docker build, rolling restart, and health checking.
+#
+# To disable for a single push:
+#   SKIP_DEPLOY=1 git push
+#
+# To force a no-cache rebuild on next push:
+#   DEPLOY_NO_CACHE=1 git push
+# =============================================================================
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$HOOK_DIR/../.." && pwd)"
+DEPLOY_SCRIPT="$PROJECT_DIR/scripts/deploy.sh"
+LOG_FILE="$PROJECT_DIR/.git/deploy.log"
+
+# ── Escape hatch ──────────────────────────────────────────────────────────────
+if [[ "${SKIP_DEPLOY:-0}" == "1" ]]; then
+  echo "[post-push] SKIP_DEPLOY=1 — skipping auto-deploy."
+  exit 0
+fi
+
+# ── Guard: deploy script must exist and be executable ────────────────────────
+if [[ ! -x "$DEPLOY_SCRIPT" ]]; then
+  echo "[post-push] Deploy script not found or not executable: $DEPLOY_SCRIPT"
+  echo "[post-push] Run: make install"
+  exit 0   # Don't fail the push itself
+fi
+
+# ── Extra flags ───────────────────────────────────────────────────────────────
+EXTRA_FLAGS=""
+[[ "${DEPLOY_NO_CACHE:-0}" == "1" ]] && EXTRA_FLAGS="--no-cache"
+
+# ── Run deploy (logged) ───────────────────────────────────────────────────────
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  🚀  Auto-deploy triggered by git push                  ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# Tee output to both terminal and log file
+{
+  echo "=== Deploy started at $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
+  "$DEPLOY_SCRIPT" $EXTRA_FLAGS
+  echo "=== Deploy finished at $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
+} 2>&1 | tee -a "$LOG_FILE"
+
+# Propagate the exit code from deploy.sh
+exit "${PIPESTATUS[0]}"

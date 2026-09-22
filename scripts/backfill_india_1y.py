@@ -74,7 +74,7 @@ if str(_REPO_ROOT) not in sys.path:
 # Instrument list
 # ---------------------------------------------------------------------------
 from scripts.india_instruments import (  # noqa: E402
-    ALL_INSTRUMENTS,
+    ALL_EQ_IDX as ALL_INSTRUMENTS,   # 1y script only covers IDX + EQ (no FO)
     NSE_INDICES,
     NIFTY50_EQUITIES,
     InstrumentEntry,

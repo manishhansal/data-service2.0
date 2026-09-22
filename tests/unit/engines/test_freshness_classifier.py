@@ -92,7 +92,8 @@ class TestAgeSeconds:
 
     def test_naive_datetime_treated_as_utc(self) -> None:
         # Naive datetime 60s in the past (interpreted as UTC)
-        ts = datetime.utcnow() - timedelta(seconds=60)
+        import datetime as _dt
+        ts = _dt.datetime.now(_dt.UTC).replace(tzinfo=None) - timedelta(seconds=60)
         age = FreshnessClassifier.age_seconds(ts)
         assert 58.0 <= age <= 62.0, f"Expected ~60s, got {age}"
 

@@ -99,11 +99,11 @@ _FALLBACK_PROVIDER = ProviderId.OPENCHART
 # Source: design doc "Provider chunk limits" table + capability_matrix.py.
 _ANGEL_ONE_CHUNK_DAYS: dict[str, int] = {
     "1m":  30,
-    "5m":  90,
-    "10m": 90,
-    "15m": 90,
-    "30m": 90,
-    "1h":  90,
+    "5m":  30,   # was 90 — reduced to 30 so Upstox fallback doesn't get oversized windows
+    "10m": 30,   # was 90
+    "15m": 30,   # was 90
+    "30m": 30,   # was 90
+    "1h":  30,   # was 90
     "1d":  365,
     "1w":  365,
     "1M":  365,
@@ -204,21 +204,32 @@ _ANGEL_ONE_KNOWN_TOKENS: dict[str, str] = {
 # Reference: https://upstox.com/developer/api-documentation/instruments
 # ---------------------------------------------------------------------------
 _UPSTOX_INSTRUMENT_KEYS: dict[str, str] = {
-    # Indices (NSE)
-    "NIFTY":        "NSE_INDEX|Nifty 50",
-    "BANKNIFTY":    "NSE_INDEX|Nifty Bank",
-    "FINNIFTY":     "NSE_INDEX|Nifty Fin Service",
-    "MIDCPNIFTY":   "NSE_INDEX|Nifty Midcap Select",
-    "NIFTYNEXT50":  "NSE_INDEX|Nifty Next 50",
-    "INDIAVIX":     "NSE_INDEX|India VIX",
-    "NIFTYIT":      "NSE_INDEX|Nifty IT",
-    "NIFTYAUTO":    "NSE_INDEX|Nifty Auto",
-    "NIFTYPHARMA":  "NSE_INDEX|Nifty Pharma",
-    "NIFTYFMCG":    "NSE_INDEX|Nifty FMCG",
-    "NIFTYMETAL":   "NSE_INDEX|Nifty Metal",
-    "NIFTYENERGY":  "NSE_INDEX|Nifty Energy",
-    "NIFTYREALTY":  "NSE_INDEX|Nifty Realty",
-    "NIFTYPSUBANK": "NSE_INDEX|Nifty PSU Bank",
+    # Indices (NSE) — keyed by both the short NFO symbol AND the full display
+    # name used in india_instruments.py so both lookup paths resolve correctly.
+    "NIFTY":              "NSE_INDEX|Nifty 50",
+    "NIFTY 50":           "NSE_INDEX|Nifty 50",
+    "BANKNIFTY":          "NSE_INDEX|Nifty Bank",
+    "NIFTY BANK":         "NSE_INDEX|Nifty Bank",
+    "FINNIFTY":           "NSE_INDEX|Nifty Fin Service",
+    "NIFTY FIN SERVICE":  "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY":         "NSE_INDEX|Nifty Midcap Select",   # NOTE: Upstox returns UDAPI100011 — instrument not found; excluded from intraday routing
+    "NIFTY MIDCAP 50":    "NSE_INDEX|Nifty Midcap 50",
+    "NIFTYNEXT50":        "NSE_INDEX|Nifty Next 50",
+    "INDIAVIX":           "NSE_INDEX|India VIX",
+    "INDIA VIX":          "NSE_INDEX|India VIX",
+    "NIFTYIT":            "NSE_INDEX|Nifty IT",
+    "NIFTY IT":           "NSE_INDEX|Nifty IT",
+    "NIFTYAUTO":          "NSE_INDEX|Nifty Auto",
+    "NIFTY AUTO":         "NSE_INDEX|Nifty Auto",
+    "NIFTYPHARMA":        "NSE_INDEX|Nifty Pharma",
+    "NIFTY PHARMA":       "NSE_INDEX|Nifty Pharma",
+    "NIFTYFMCG":          "NSE_INDEX|Nifty FMCG",
+    "NIFTY FMCG":         "NSE_INDEX|Nifty FMCG",
+    "NIFTYMETAL":         "NSE_INDEX|Nifty Metal",
+    "NIFTYENERGY":        "NSE_INDEX|Nifty Energy",
+    "NIFTYREALTY":        "NSE_INDEX|Nifty Realty",
+    "NIFTY REALTY":       "NSE_INDEX|Nifty Realty",
+    "NIFTYPSUBANK":       "NSE_INDEX|Nifty PSU Bank",
     # Equities — NSE_EQ|{ISIN}
     "RELIANCE":     "NSE_EQ|INE002A01018",
     "HDFCBANK":     "NSE_EQ|INE040A01034",
@@ -266,13 +277,251 @@ _UPSTOX_INSTRUMENT_KEYS: dict[str, str] = {
     "M&M":          "NSE_EQ|INE101A01026",
     "TATACONSUM":   "NSE_EQ|INE192A01025",
     "SHREECEM":     "NSE_EQ|INE070A01015",
+    # Additional Nifty 50 constituents in the 5y instrument list
+    "ITC":          "NSE_EQ|INE154A01025",
+    "HDFCLIFE":     "NSE_EQ|INE795G01014",
+    "SBILIFE":      "NSE_EQ|INE123W01016",
+    "LTI":          "NSE_EQ|INE214T01019",   # LTIMindtree
+    "APOLLOHOSP":   "NSE_EQ|INE437A01024",
+    # ── Full NSE F&O universe — all 229 additional stocks ─────────────────
+    "360ONE":       "NSE_EQ|INE466L01038",
+    "AARTIIND":     "NSE_EQ|INE769A01020",
+    "ABB":          "NSE_EQ|INE117A01022",
+    "ABBOTINDIA":   "NSE_EQ|INE358A01014",
+    "ABCAPITAL":    "NSE_EQ|INE674K01013",
+    "ABFRL":        "NSE_EQ|INE647O01011",
+    "ACC":          "NSE_EQ|INE012A01025",
+    "ADANIENSOL":   "NSE_EQ|INE931S01010",
+    "ADANIGREEN":   "NSE_EQ|INE364U01010",
+    "ADANIPOWER":   "NSE_EQ|INE814H01029",
+    "ALKEM":        "NSE_EQ|INE540L01014",
+    "AMBER":        "NSE_EQ|INE371P01015",
+    "AMBUJACEM":    "NSE_EQ|INE079A01024",
+    "ANGELONE":     "NSE_EQ|INE732I01021",
+    "APLAPOLLO":    "NSE_EQ|INE702C01027",
+    "APLLTD":       "NSE_EQ|INE901L01018",
+    "APOLLOTYRE":   "NSE_EQ|INE438A01022",
+    "ASHOKLEY":     "NSE_EQ|INE208A01029",
+    "ASTRAL":       "NSE_EQ|INE006I01046",
+    "ATGL":         "NSE_EQ|INE399L01023",
+    "ATHERENERG":   "NSE_EQ|INE0LEZ01016",
+    "ATUL":         "NSE_EQ|INE100A01010",
+    "AUBANK":       "NSE_EQ|INE949L01017",
+    "AUROPHARMA":   "NSE_EQ|INE406A01037",
+    "BAJAJHLDNG":   "NSE_EQ|INE118A01012",
+    "BALKRISIND":   "NSE_EQ|INE787D01026",
+    "BALRAMCHIN":   "NSE_EQ|INE119A01028",
+    "BANDHANBNK":   "NSE_EQ|INE545U01014",
+    "BANKBARODA":   "NSE_EQ|INE028A01039",
+    "BANKINDIA":    "NSE_EQ|INE084A01016",
+    "BATAINDIA":    "NSE_EQ|INE176A01028",
+    "BDL":          "NSE_EQ|INE171Z01026",
+    "BEL":          "NSE_EQ|INE263A01024",
+    "BERGEPAINT":   "NSE_EQ|INE463A01038",
+    "BHARATFORG":   "NSE_EQ|INE465A01025",
+    "BHEL":         "NSE_EQ|INE257A01026",
+    "BIOCON":       "NSE_EQ|INE376G01013",
+    "BLUESTARCO":   "NSE_EQ|INE472A01039",
+    "BOSCHLTD":     "NSE_EQ|INE323A01026",
+    "BSE":          "NSE_EQ|INE118H01025",
+    "BSOFT":        "NSE_EQ|INE836A01035",
+    "CAMS":         "NSE_EQ|INE596I01020",
+    "CANBK":        "NSE_EQ|INE476A01022",
+    "CANFINHOME":   "NSE_EQ|INE477A01020",
+    "CDSL":         "NSE_EQ|INE736A01011",
+    "CESC":         "NSE_EQ|INE486A01021",
+    "CGPOWER":      "NSE_EQ|INE067A01029",
+    "CHAMBLFERT":   "NSE_EQ|INE085A01013",
+    "CHOLAFIN":     "NSE_EQ|INE121A01024",
+    "COCHINSHIP":   "NSE_EQ|INE704P01025",
+    "COFORGE":      "NSE_EQ|INE591G01025",
+    "COLPAL":       "NSE_EQ|INE259A01022",
+    "CONCOR":       "NSE_EQ|INE111A01025",
+    "COROMANDEL":   "NSE_EQ|INE169A01031",
+    "CROMPTON":     "NSE_EQ|INE299U01018",
+    "CUB":          "NSE_EQ|INE491A01021",
+    "CUMMINSIND":   "NSE_EQ|INE298A01020",
+    "CYIENT":       "NSE_EQ|INE136B01020",
+    "DABUR":        "NSE_EQ|INE016A01026",
+    "DALBHARAT":    "NSE_EQ|INE00R701025",
+    "DEEPAKNTR":    "NSE_EQ|INE288B01029",
+    "DELHIVERY":    "NSE_EQ|INE148O01028",
+    "DELTACORP":    "NSE_EQ|INE124G01033",
+    "DIXON":        "NSE_EQ|INE935N01020",
+    "DLF":          "NSE_EQ|INE271C01023",
+    "DMART":        "NSE_EQ|INE192R01011",
+    "ESCORTS":      "NSE_EQ|INE042A01014",
+    "ETERNAL":      "NSE_EQ|INE758T01015",
+    "EXIDEIND":     "NSE_EQ|INE302A01020",
+    "FEDERALBNK":   "NSE_EQ|INE171A01029",
+    "FORCEMOT":     "NSE_EQ|INE451A01017",
+    "FORTIS":       "NSE_EQ|INE061F01013",
+    "FSL":          "NSE_EQ|INE684F01012",
+    "GAIL":         "NSE_EQ|INE129A01019",
+    "GLENMARK":     "NSE_EQ|INE935A01035",
+    "GMRAIRPORT":   "NSE_EQ|INE776C01039",
+    "GNFC":         "NSE_EQ|INE113A01013",
+    "GODFRYPHLP":   "NSE_EQ|INE260B01028",
+    "GODREJCP":     "NSE_EQ|INE102D01028",
+    "GODREJPROP":   "NSE_EQ|INE484J01027",
+    "GRANULES":     "NSE_EQ|INE101D01020",
+    "GVT&D":        "NSE_EQ|INE200A01026",
+    "HAL":          "NSE_EQ|INE066F01020",
+    "HAVELLS":      "NSE_EQ|INE176B01034",
+    "HDFCAMC":      "NSE_EQ|INE127D01025",
+    "HINDCOPPER":   "NSE_EQ|INE531E01026",
+    "HINDPETRO":    "NSE_EQ|INE094A01015",
+    "HINDZINC":     "NSE_EQ|INE267A01025",
+    "HONAUT":       "NSE_EQ|INE671A01010",
+    "HUDCO":        "NSE_EQ|INE031A01017",
+    "HYUNDAI":      "NSE_EQ|INE0V6F01027",
+    "ICICIGI":      "NSE_EQ|INE765G01017",
+    "ICICIPRULI":   "NSE_EQ|INE726G01019",
+    "IDEA":         "NSE_EQ|INE669E01016",
+    "IDFCFIRSTB":   "NSE_EQ|INE092T01019",
+    "IEX":          "NSE_EQ|INE022Q01020",
+    "IGL":          "NSE_EQ|INE203G01027",
+    "IIFL":         "NSE_EQ|INE530B01024",
+    "INDHOTEL":     "NSE_EQ|INE053A01029",
+    "INDIACEM":     "NSE_EQ|INE383A01012",
+    "INDIAMART":    "NSE_EQ|INE933S01016",
+    "INDIANB":      "NSE_EQ|INE562A01011",
+    "INDIGO":       "NSE_EQ|INE646L01027",
+    "INDUSTOWER":   "NSE_EQ|INE121J01017",
+    "INOXWIND":     "NSE_EQ|INE066P01011",
+    "INTELLECT":    "NSE_EQ|INE306R01017",
+    "IOC":          "NSE_EQ|INE242A01010",
+    "IPCALAB":      "NSE_EQ|INE571A01038",
+    "IRB":          "NSE_EQ|INE821I01022",
+    "IRCTC":        "NSE_EQ|INE335Y01020",
+    "IREDA":        "NSE_EQ|INE202E01016",
+    "IRFC":         "NSE_EQ|INE053F01010",
+    "JINDALSTEL":   "NSE_EQ|INE749A01030",
+    "JIOFIN":       "NSE_EQ|INE758E01017",
+    "JKCEMENT":     "NSE_EQ|INE823G01014",
+    "JSL":          "NSE_EQ|INE220G01021",
+    "JSWENERGY":    "NSE_EQ|INE121E01018",
+    "JUBLFOOD":     "NSE_EQ|INE797F01020",
+    "KALYANKJIL":   "NSE_EQ|INE303R01014",
+    "KAYNES":       "NSE_EQ|INE918Z01012",
+    "KEI":          "NSE_EQ|INE878B01027",
+    "KFINTECH":     "NSE_EQ|INE138Y01010",
+    "KPITTECH":     "NSE_EQ|INE04I401011",
+    "LALPATHLAB":   "NSE_EQ|INE600L01024",
+    "LAURUSLABS":   "NSE_EQ|INE947Q01028",
+    "LICHSGFIN":    "NSE_EQ|INE115A01026",
+    "LICI":         "NSE_EQ|INE0J1Y01017",
+    "LODHA":        "NSE_EQ|INE670K01029",
+    "LTF":          "NSE_EQ|INE498L01015",
+    "LTTS":         "NSE_EQ|INE010V01017",
+    "LUPIN":        "NSE_EQ|INE326A01037",
+    "M&MFIN":       "NSE_EQ|INE774D01024",
+    "MAHABANK":     "NSE_EQ|INE457A01014",
+    "MANAPPURAM":   "NSE_EQ|INE522D01027",
+    "MANKIND":      "NSE_EQ|INE634S01028",
+    "MARICO":       "NSE_EQ|INE196A01026",
+    "MAXHEALTH":    "NSE_EQ|INE027H01010",
+    "MAZDOCK":      "NSE_EQ|INE249Z01020",
+    "MCX":          "NSE_EQ|INE745G01043",
+    "METROPOLIS":   "NSE_EQ|INE112L01020",
+    "MFSL":         "NSE_EQ|INE180A01020",
+    "MGL":          "NSE_EQ|INE002S01010",
+    "MOTHERSON":    "NSE_EQ|INE775A01035",
+    "MOTILALOFS":   "NSE_EQ|INE338I01027",
+    "MPHASIS":      "NSE_EQ|INE356A01018",
+    "MRF":          "NSE_EQ|INE883A01011",
+    "MUTHOOTFIN":   "NSE_EQ|INE414G01012",
+    "NAM-INDIA":    "NSE_EQ|INE298J01013",
+    "NATIONALUM":   "NSE_EQ|INE139A01034",
+    "NAUKRI":       "NSE_EQ|INE663F01032",
+    "NAVINFLUOR":   "NSE_EQ|INE048G01026",
+    "NBCC":         "NSE_EQ|INE095N01031",
+    "NCC":          "NSE_EQ|INE868B01028",
+    "NHPC":         "NSE_EQ|INE848E01016",
+    "NMDC":         "NSE_EQ|INE584A01023",
+    "NUVAMA":       "NSE_EQ|INE531F01023",
+    "NYKAA":        "NSE_EQ|INE388Y01029",
+    "OBEROIRLTY":   "NSE_EQ|INE093I01010",
+    "OFSS":         "NSE_EQ|INE881D01027",
+    "OIL":          "NSE_EQ|INE274J01014",
+    "PAGEIND":      "NSE_EQ|INE761H01022",
+    "PATANJALI":    "NSE_EQ|INE619A01035",
+    "PAYTM":        "NSE_EQ|INE982J01020",
+    "PERSISTENT":   "NSE_EQ|INE262H01021",
+    "PETRONET":     "NSE_EQ|INE347G01014",
+    "PFC":          "NSE_EQ|INE134E01011",
+    "PFIZER":       "NSE_EQ|INE182A01018",
+    "PHOENIXLTD":   "NSE_EQ|INE211B01039",
+    "PIDILITIND":   "NSE_EQ|INE318A01026",
+    "PIIND":        "NSE_EQ|INE603J01030",
+    "PNB":          "NSE_EQ|INE160A01022",
+    "PNBHOUSING":   "NSE_EQ|INE572E01012",
+    "POLICYBZR":    "NSE_EQ|INE417T01026",
+    "POLYCAB":      "NSE_EQ|INE455K01017",
+    "POONAWALLA":   "NSE_EQ|INE511C01022",
+    "POWERINDIA":   "NSE_EQ|INE07Y701011",
+    "PPLPHARMA":    "NSE_EQ|INE0DK501011",
+    "PREMIERENE":   "NSE_EQ|INE0BS701011",
+    "PRESTIGE":     "NSE_EQ|INE811K01011",
+    "PVRINOX":      "NSE_EQ|INE191H01014",
+    "RADICO":       "NSE_EQ|INE944F01028",
+    "RAIN":         "NSE_EQ|INE855B01025",
+    "RAMCOCEM":     "NSE_EQ|INE331A01037",
+    "RBLBANK":      "NSE_EQ|INE976G01028",
+    "RECLTD":       "NSE_EQ|INE020B01018",
+    "RVNL":         "NSE_EQ|INE415G01027",
+    "SAGILITY":     "NSE_EQ|INE0W2G01015",
+    "SAIL":         "NSE_EQ|INE114A01011",
+    "SAMMAANCAP":   "NSE_EQ|INE148I01020",
+    "SBICARD":      "NSE_EQ|INE018E01016",
+    "SHRIRAMFIN":   "NSE_EQ|INE721A01047",
+    "SIEMENS":      "NSE_EQ|INE003A01024",
+    "SJVN":         "NSE_EQ|INE002L01015",
+    "SOLARINDS":    "NSE_EQ|INE343H01029",
+    "SONACOMS":     "NSE_EQ|INE073K01018",
+    "SRF":          "NSE_EQ|INE647A01010",
+    "STAR":         "NSE_EQ|INE939A01011",
+    "SUNTV":        "NSE_EQ|INE424H01027",
+    "SUPREMEIND":   "NSE_EQ|INE195A01028",
+    "SUZLON":       "NSE_EQ|INE040H01021",
+    "SWIGGY":       "NSE_EQ|INE00H001014",
+    "SYNGENE":      "NSE_EQ|INE398R01022",
+    "TATACHEM":     "NSE_EQ|INE092A01019",
+    "TATACOMM":     "NSE_EQ|INE151A01013",
+    "TATACONSUM":   "NSE_EQ|INE192A01025",
+    "TATAELXSI":    "NSE_EQ|INE670A01012",
+    "TATAPOWER":    "NSE_EQ|INE245A01021",
+    "TATATECH":     "NSE_EQ|INE142M01025",
+    "TIINDIA":      "NSE_EQ|INE974X01010",
+    "TITAGARH":     "NSE_EQ|INE615H01020",
+    "TORNTPHARM":   "NSE_EQ|INE685A01028",
+    "TORNTPOWER":   "NSE_EQ|INE813H01021",
+    "TRENT":        "NSE_EQ|INE849A01020",
+    "TVSMOTOR":     "NSE_EQ|INE494B01023",
+    "UBL":          "NSE_EQ|INE686F01025",
+    "UNIONBANK":    "NSE_EQ|INE692A01016",
+    "UNITDSPR":     "NSE_EQ|INE854D01024",
+    "UNOMINDA":     "NSE_EQ|INE405E01023",
+    "VBL":          "NSE_EQ|INE200M01039",
+    "VEDL":         "NSE_EQ|INE205A01025",
+    "VMM":          "NSE_EQ|INE01EA01019",
+    "VOLTAS":       "NSE_EQ|INE226A01021",
+    "WAAREEENER":   "NSE_EQ|INE377N01017",
+    "WHIRLPOOL":    "NSE_EQ|INE716A01013",
+    "YESBANK":      "NSE_EQ|INE528G01035",
+    "ZEEL":         "NSE_EQ|INE256A01028",
+    "ZYDUSLIFE":    "NSE_EQ|INE010B01027",
 }
 
-# Upstox V2 intervals confirmed working on standard plan (verified 2026-09-14).
-# Intervals NOT in this set (5m, 10m, 15m, 1h) return UDAPI1020 on basic plan.
-_UPSTOX_V2_SUPPORTED_INTERVALS: frozenset[str] = frozenset(
-    {"1m", "30m", "1d", "1w", "1M"}
+# All intervals supported by the Upstox V3 historical candle API.
+# V3 supports all canonical intervals on all plans — the old V2 basic-plan
+# restriction (UDAPI1020 on 5m/10m/15m/1h) no longer applies.
+_UPSTOX_V3_SUPPORTED_INTERVALS: frozenset[str] = frozenset(
+    {"1m", "5m", "10m", "15m", "30m", "1h", "1d", "1w", "1M"}
 )
+# Backward-compatible alias kept so any external code referencing the old name
+# still compiles, but it now points to the full V3 set.
+_UPSTOX_V2_SUPPORTED_INTERVALS: frozenset[str] = _UPSTOX_V3_SUPPORTED_INTERVALS
 
 # ---------------------------------------------------------------------------
 # Reconciliation thresholds (Requirements 10.5, 10.6, 10.7)
@@ -1079,6 +1328,53 @@ class HistoricalEngine:
                 error=str(exc),
             )
 
+
+    @staticmethod
+    async def clear_checkpoint(
+        *,
+        symbol: str,
+        exchange: str,
+        interval: str,
+        redis_client: "AsyncRedis",
+    ) -> None:
+        """Delete the Redis checkpoint for a symbol/exchange/interval tuple.
+
+        Used by the ``force=True`` backfill path to ensure the full requested
+        date range is re-fetched, bypassing any checkpoint that would otherwise
+        skip historical dates earlier than the last persisted candle.
+
+        Safe to call when no checkpoint exists (Redis DEL on missing key is
+        a no-op).
+
+        Args:
+            symbol:       Instrument trading symbol.
+            exchange:     Exchange identifier.
+            interval:     Candle interval string.
+            redis_client: Async Redis client.
+        """
+        key = _CHECKPOINT_KEY_TEMPLATE.format(
+            symbol=symbol, exchange=exchange, interval=interval
+        )
+        try:
+            await redis_client.delete(key)
+            logger.info(
+                "backfill_checkpoint_cleared",
+                component="historical_engine",
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                key=key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "backfill_checkpoint_clear_error",
+                component="historical_engine",
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                error=str(exc),
+            )
+
     # ------------------------------------------------------------------ #
     # Bulk upsert
     # ------------------------------------------------------------------ #
@@ -1192,6 +1488,38 @@ class HistoricalEngine:
         # Segment label (EQ | IDX | ETF) used only by equity_candle.
         segment = "IDX" if instrument_class.upper() in ("IDX",) else "EQ"
 
+        # For F&O tables, resolve expiry and underlying_id from instrument_master.
+        # The Angel One API OHLCV response does not include expiry in each bar;
+        # it must be looked up once per instrument and injected into every row.
+        _fno_expiry: "datetime.date | None" = None
+        _fno_underlying: "str | None" = None
+        if target_table in ("futures_candle", "options_candle"):
+            _canonical_id = f"{exchange}:{symbol}"
+            try:
+                async with db_engine.connect() as _conn:
+                    _im_row = (await _conn.execute(
+                        text(
+                            "SELECT expiry, underlying FROM instrument_master "
+                            "WHERE instrument_id = :iid LIMIT 1"
+                        ),
+                        {"iid": _canonical_id},
+                    )).mappings().first()
+                    if _im_row:
+                        _fno_expiry = _im_row.get("expiry")
+                        _underlying = _im_row.get("underlying")
+                        if _underlying:
+                            # underlying in instrument_master is bare symbol (e.g. "NIFTY")
+                            # Qualify it with exchange prefix for canonical ID
+                            _fno_underlying = f"NSE:{_underlying}" if ":" not in _underlying else _underlying
+            except Exception as _exc:  # noqa: BLE001
+                logger.warning(
+                    "fno_expiry_lookup_failed",
+                    component="historical_engine",
+                    symbol=symbol,
+                    error=str(_exc),
+                )
+
+
         # Build the list of row dicts for the upsert.
         rows = []
         for c in candles:
@@ -1234,9 +1562,12 @@ class HistoricalEngine:
                     # equity_candle-specific
                     "segment": segment,
                     # futures/options-specific (None for equity)
-                    "expiry": c.get("expiry"),
+                    "expiry": c.get("expiry") or _fno_expiry,
                     "strike": c.get("strike"),
                     "option_type": c.get("optionType"),
+                    # provenance fields — populated when available
+                    "underlying_id": c.get("underlyingId") or _fno_underlying,
+                    "source_timestamp": _coerce_to_datetime(c.get("sourceTimestamp")) if c.get("sourceTimestamp") else None,
                 }
             )
 
@@ -1252,14 +1583,16 @@ class HistoricalEngine:
                     open, high, low, close, volume,
                     volume_unavailable, provider, source_type,
                     dataset_version, session_date, normalisation_version,
-                    poor_quality, data_origin, quality_status
+                    poor_quality, data_origin, quality_status,
+                    source_timestamp
                 ) VALUES (
                     :instrument_id, :exchange, :segment, :interval_str, :time,
                     :open, :high, :low, :close, :volume,
                     :volume_unavailable, :provider, :source_type,
                     :dataset_version, :session_date, :normalisation_version,
                     :poor_quality, 'PROVIDER',
-                    CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END
+                    CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
+                    :source_timestamp
                 )
                 ON CONFLICT (instrument_id, exchange, interval_str, time)
                 DO UPDATE SET
@@ -1272,7 +1605,8 @@ class HistoricalEngine:
                     dataset_version       = EXCLUDED.dataset_version,
                     normalisation_version = EXCLUDED.normalisation_version,
                     poor_quality          = EXCLUDED.poor_quality,
-                    quality_status        = EXCLUDED.quality_status
+                    quality_status        = EXCLUDED.quality_status,
+                    source_timestamp      = COALESCE(EXCLUDED.source_timestamp, equity_candle.source_timestamp)
                 """
             )
         # ── futures_candle upsert ─────────────────────────────────────────
@@ -1285,7 +1619,7 @@ class HistoricalEngine:
                     provider, source_type,
                     dataset_version, session_date, normalisation_version,
                     poor_quality, data_origin, quality_status,
-                    expiry
+                    expiry, underlying_id, source_timestamp
                 ) VALUES (
                     :instrument_id, :exchange, :interval_str, :time,
                     :open, :high, :low, :close, :volume, :oi,
@@ -1293,7 +1627,7 @@ class HistoricalEngine:
                     :dataset_version, :session_date, :normalisation_version,
                     :poor_quality, 'PROVIDER',
                     CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
-                    :expiry
+                    :expiry, :underlying_id, :source_timestamp
                 )
                 ON CONFLICT (instrument_id, exchange, interval_str, time)
                 DO UPDATE SET
@@ -1307,7 +1641,9 @@ class HistoricalEngine:
                     dataset_version       = EXCLUDED.dataset_version,
                     normalisation_version = EXCLUDED.normalisation_version,
                     poor_quality          = EXCLUDED.poor_quality,
-                    quality_status        = EXCLUDED.quality_status
+                    quality_status        = EXCLUDED.quality_status,
+                    underlying_id         = COALESCE(EXCLUDED.underlying_id, futures_candle.underlying_id),
+                    source_timestamp      = COALESCE(EXCLUDED.source_timestamp, futures_candle.source_timestamp)
                 """
             )
         # ── options_candle upsert ─────────────────────────────────────────
@@ -1320,7 +1656,7 @@ class HistoricalEngine:
                     provider, source_type,
                     dataset_version, session_date, normalisation_version,
                     poor_quality, data_origin, quality_status,
-                    expiry, strike, option_type
+                    expiry, strike, option_type, underlying_id, source_timestamp
                 ) VALUES (
                     :instrument_id, :exchange, :interval_str, :time,
                     :open, :high, :low, :close, :volume, :oi,
@@ -1328,7 +1664,7 @@ class HistoricalEngine:
                     :dataset_version, :session_date, :normalisation_version,
                     :poor_quality, 'PROVIDER',
                     CASE WHEN :poor_quality THEN 'POOR_QUALITY' ELSE 'TRUSTED' END,
-                    :expiry, :strike, :option_type
+                    :expiry, :strike, :option_type, :underlying_id, :source_timestamp
                 )
                 ON CONFLICT (instrument_id, exchange, interval_str, time)
                 DO UPDATE SET
@@ -1342,7 +1678,9 @@ class HistoricalEngine:
                     dataset_version       = EXCLUDED.dataset_version,
                     normalisation_version = EXCLUDED.normalisation_version,
                     poor_quality          = EXCLUDED.poor_quality,
-                    quality_status        = EXCLUDED.quality_status
+                    quality_status        = EXCLUDED.quality_status,
+                    underlying_id         = COALESCE(EXCLUDED.underlying_id, options_candle.underlying_id),
+                    source_timestamp      = COALESCE(EXCLUDED.source_timestamp, options_candle.source_timestamp)
                 """
             )
 
@@ -1407,17 +1745,23 @@ class HistoricalEngine:
             # OAuth credentials not yet configured.  Angel One covers NSE
             # indices (NIFTY, BANKNIFTY, etc.) via its own token IDs and is
             # available when authenticated — prefer it as the practical primary.
-            # Also: if the interval is not supported on Upstox basic plan
-            # (5m, 10m, 15m, 1h), route to Angel One which has full coverage.
             from src.core.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
             angel_available = bool(settings.angel_one_api_key and settings.angel_one_mpin)
-            upstox_available = bool(settings.upstox_access_token)
-            if upstox_available and interval in _UPSTOX_V2_SUPPORTED_INTERVALS:
+            upstox_available = bool(settings.upstox_access_token or settings.upstox_analytics_key)
+            # IMPORTANT: Upstox NSE_INDEX instruments only support 1d/1w/1M.
+            # Intraday (1m-1h) returns UDAPI100011 "Instrument not found" for
+            # all NSE_INDEX keys — Upstox does not provide index intraday data
+            # via the historical-candle endpoint.
+            _index_eod = interval in ("1d", "1w", "1M")
+            if upstox_available and _index_eod:
                 return ProviderId.UPSTOX
             if angel_available:
                 return ProviderId.ANGEL_ONE
-            return ProviderId.UPSTOX
+            # Fallback: Upstox for EOD, skip intraday for indices
+            if upstox_available and _index_eod:
+                return ProviderId.UPSTOX
+            return ProviderId.ANGEL_ONE
 
         if instrument_class == "FO" and interval == "1d":
             # Jugaad-data F&O bhavcopy is broken for dates after 2024-07-08
@@ -1433,17 +1777,19 @@ class HistoricalEngine:
 
         if instrument_class in ("EQ", "FO"):
             # Angel One is primary for intraday (1m–1h).
-            # For EOD (1d, 1w, 1M) Upstox is equally good and also works with
-            # our basic plan — use Upstox when access token is available, as
-            # it returns full ISIN-keyed data with no token-lookup dependency.
+            # For EOD (1d, 1w, 1M) Upstox V3 is equally good — use it when
+            # an access token OR the long-lived analytics token is available.
             # If Upstox not configured, fall back to Jugaad (stock_df) for EQ 1d.
             from src.core.settings import get_settings  # noqa: PLC0415
             settings = get_settings()
-            if interval in ("1d", "1w", "1M") and settings.upstox_access_token:
+            upstox_available = bool(settings.upstox_access_token or settings.upstox_analytics_key)
+            if interval in ("1d", "1w", "1M") and upstox_available:
                 return ProviderId.UPSTOX
             if interval in ("1d",) and instrument_class == "EQ":
-                # Jugaad (stock_df) works for EQ 1d when Upstox not configured
                 return ProviderId.JUGAAD_DATA
+            # Intraday default: Angel One (the caller _fetch_candles will fall
+            # back to Upstox automatically when angel_token is unknown and
+            # a Upstox ISIN key is available for the symbol).
             return ProviderId.ANGEL_ONE
 
         # Everything else (e.g. IDX at EOD, unknown classes) → OpenChart.
@@ -1557,28 +1903,55 @@ class HistoricalEngine:
                     return []
 
                 # Resolve numeric Angel One token.
-                # Priority: 1) instrument_master DB  2) well-known token map
+                # Priority:
+                #   1) instrument_provider_mapping table (covers F&O and EQ)
+                #   2) instrument_master table (EQ/IDX fallback)
+                #   3) well-known static token map
                 angel_token: str = symbol  # fallback: plain symbol (may fail)
                 base_symbol = symbol.split(":")[1] if ":" in symbol else symbol
                 instrument_id = f"{exchange}:{base_symbol}"
 
-                # Priority 1: Look up from instrument_master table via DB
+                # Priority 1: Look up from instrument_provider_mapping (correct for F&O)
+                # This table has provider_instrument_id = Angel One numeric token
+                # keyed by canonical instrument_id + provider = "angel_one"
                 if self._db_engine is not None:
                     from sqlalchemy import text as _text  # noqa: PLC0415
                     try:
                         async with self._db_engine.connect() as _conn:
+                            # First try instrument_provider_mapping — covers F&O contracts
                             _row = (await _conn.execute(
-                                _text("SELECT angel_token FROM instrument_master WHERE instrument_id=:iid OR (trading_symbol=:sym AND exchange=:exch) LIMIT 1"),
-                                {"iid": instrument_id, "sym": base_symbol, "exch": exchange},
+                                _text("""
+                                    SELECT provider_instrument_id
+                                    FROM instrument_provider_mapping
+                                    WHERE instrument_id = :iid
+                                      AND provider = 'angel_one'
+                                    LIMIT 1
+                                """),
+                                {"iid": instrument_id},
                             )).mappings().first()
-                        if _row and _row.get("angel_token"):
-                            angel_token = _row["angel_token"]
-                            logger.debug(
-                                "angel_one_token_resolved_from_db",
-                                component="historical_engine",
-                                symbol=symbol,
-                                token=angel_token,
-                            )
+                            if _row and _row.get("provider_instrument_id"):
+                                angel_token = _row["provider_instrument_id"]
+                                logger.debug(
+                                    "angel_one_token_resolved_from_mapping",
+                                    component="historical_engine",
+                                    symbol=symbol,
+                                    instrument_id=instrument_id,
+                                    token=angel_token,
+                                )
+                            else:
+                                # Fallback: instrument_master.angel_token (EQ/IDX)
+                                _row2 = (await _conn.execute(
+                                    _text("SELECT angel_token FROM instrument_master WHERE instrument_id=:iid OR (trading_symbol=:sym AND exchange=:exch) LIMIT 1"),
+                                    {"iid": instrument_id, "sym": base_symbol, "exch": exchange},
+                                )).mappings().first()
+                                if _row2 and _row2.get("angel_token"):
+                                    angel_token = _row2["angel_token"]
+                                    logger.debug(
+                                        "angel_one_token_resolved_from_master",
+                                        component="historical_engine",
+                                        symbol=symbol,
+                                        token=angel_token,
+                                    )
                     except Exception as _exc:  # noqa: BLE001
                         logger.debug(
                             "angel_one_token_db_lookup_failed",
@@ -1601,8 +1974,50 @@ class HistoricalEngine:
                         "angel_one_token_unknown",
                         component="historical_engine",
                         symbol=symbol,
-                        hint="Token not found in instrument_master or _ANGEL_ONE_KNOWN_TOKENS",
+                        hint="Token not in instrument_provider_mapping, instrument_master, or _ANGEL_ONE_KNOWN_TOKENS. Run /v1/admin/instruments/sync to populate.",
                     )
+                    # ── Upstox fallback for intraday when Angel One token is unknown ──
+                    # If this symbol has a Upstox NSE_EQ|ISIN key and Upstox is
+                    # available, delegate to the Upstox path rather than sending
+                    # the raw symbol string as a token (which always fails).
+                    upstox_fallback_key = _UPSTOX_INSTRUMENT_KEYS.get(base_symbol)
+                    if not upstox_fallback_key and self._db_engine is not None:
+                        try:
+                            from sqlalchemy import text as _text_fb  # noqa: PLC0415
+                            async with self._db_engine.connect() as _conn_fb:
+                                _row_fb = (await _conn_fb.execute(
+                                    _text_fb("""
+                                        SELECT provider_instrument_id
+                                        FROM instrument_provider_mapping
+                                        WHERE instrument_id = :iid
+                                          AND provider = 'upstox'
+                                          AND is_active = TRUE
+                                        LIMIT 1
+                                    """),
+                                    {"iid": f"NSE:{base_symbol}"},
+                                )).mappings().first()
+                                if _row_fb and _row_fb.get("provider_instrument_id","").startswith("NSE_EQ|"):
+                                    upstox_fallback_key = _row_fb["provider_instrument_id"]
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if upstox_fallback_key and (settings.upstox_access_token or settings.upstox_analytics_key):
+                        logger.info(
+                            "angel_one_token_unknown_upstox_fallback",
+                            component="historical_engine",
+                            symbol=symbol,
+                            upstox_key=upstox_fallback_key,
+                            interval=interval,
+                        )
+                        # Delegate to Upstox path directly
+                        return await self._fetch_candles(
+                            provider=ProviderId.UPSTOX,
+                            symbol=symbol,
+                            exchange=exchange,
+                            instrument_class=instrument_class,
+                            interval=interval,
+                            from_ts=from_ts,
+                            to_ts=to_ts,
+                        )
 
                 # Reuse a pre-authenticated shared adapter when available
                 # (avoids repeated TOTP logins that trigger HTTP 403 under load).
@@ -1649,34 +2064,74 @@ class HistoricalEngine:
                 return candles
 
             elif provider == ProviderId.UPSTOX:
-                from src.providers.adapters.upstox import UpstoxAdapter, UPSTOX_V2_CONFIRMED_INTERVALS  # noqa: PLC0415
+                from src.providers.adapters.upstox import UpstoxAdapter  # noqa: PLC0415
                 from src.core.settings import get_settings  # noqa: PLC0415
                 settings = get_settings()
-                if not settings.upstox_access_token:
+                if not (settings.upstox_access_token or settings.upstox_analytics_key):
                     logger.debug("upstox_not_configured", component="historical_engine")
                     return []
 
-                # Resolve Upstox instrument key (NSE_EQ|ISIN or NSE_INDEX|Name)
+                # Resolve Upstox instrument key.
+                # Priority:
+                #   1) instrument_provider_mapping (covers F&O with correct ISIN/key)
+                #   2) _UPSTOX_INSTRUMENT_KEYS static map (EQ/IDX)
                 base_symbol = symbol.split(":")[1] if ":" in symbol else symbol
-                upstox_key = _UPSTOX_INSTRUMENT_KEYS.get(base_symbol)
+                instrument_id_key = f"{exchange}:{base_symbol}"
+                upstox_key: Optional[str] = None
+
+                # Priority 1: DB lookup from instrument_provider_mapping
+                if self._db_engine is not None:
+                    from sqlalchemy import text as _text  # noqa: PLC0415
+                    try:
+                        async with self._db_engine.connect() as _conn:
+                            _row = (await _conn.execute(
+                                _text("""
+                                    SELECT provider_instrument_id
+                                    FROM instrument_provider_mapping
+                                    WHERE instrument_id = :iid
+                                      AND provider = 'upstox'
+                                    LIMIT 1
+                                """),
+                                {"iid": instrument_id_key},
+                            )).mappings().first()
+                            if _row and _row.get("provider_instrument_id"):
+                                upstox_key = _row["provider_instrument_id"]
+                                logger.debug(
+                                    "upstox_key_resolved_from_mapping",
+                                    component="historical_engine",
+                                    symbol=symbol,
+                                    upstox_key=upstox_key,
+                                )
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.debug(
+                            "upstox_key_db_lookup_failed",
+                            component="historical_engine",
+                            symbol=symbol,
+                            error=str(_exc),
+                        )
+
+                # Priority 2: static map
+                if upstox_key is None:
+                    upstox_key = _UPSTOX_INSTRUMENT_KEYS.get(base_symbol)
+
                 if upstox_key is None:
                     logger.warning(
                         "upstox_instrument_key_unknown",
                         component="historical_engine",
                         symbol=symbol,
-                        hint="Add ISIN-based key to _UPSTOX_INSTRUMENT_KEYS",
+                        hint="Add ISIN-based key to instrument_provider_mapping or _UPSTOX_INSTRUMENT_KEYS",
                     )
                     return []
 
-                # Check if this interval is supported on the plan
-                if interval not in _UPSTOX_V2_SUPPORTED_INTERVALS:
+                # Check if this interval is supported on V3
+                if interval not in _UPSTOX_V3_SUPPORTED_INTERVALS:
                     logger.warning(
-                        "upstox_interval_not_on_plan",
+                        "upstox_interval_not_supported",
                         component="historical_engine",
                         symbol=symbol,
                         interval=interval,
-                        supported=sorted(_UPSTOX_V2_SUPPORTED_INTERVALS),
-                        hint="Upgrade to Upstox Pro plan for 5m/10m/15m/1h; using Angel One fallback",
+                        supported=sorted(_UPSTOX_V3_SUPPORTED_INTERVALS),
+                        hint="Interval not in Upstox V3 supported set",
                     )
                     return []
 
@@ -1691,7 +2146,13 @@ class HistoricalEngine:
                         api_secret=settings.upstox_api_secret or "",
                         redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
                     )
-                    await upstox_adapter.set_access_token(settings.upstox_access_token)
+                    # Set whichever token is available:
+                    # analytics_key works for all historical/quote calls
+                    # access_token needed for intraday and WS calls
+                    if settings.upstox_analytics_key:
+                        await upstox_adapter.set_analytics_token(settings.upstox_analytics_key)
+                    if settings.upstox_access_token:
+                        await upstox_adapter.set_access_token(settings.upstox_access_token)
                     _owns_upstox = True
 
                 logger.debug(
@@ -1713,24 +2174,34 @@ class HistoricalEngine:
                 if _owns_upstox:
                     await upstox_adapter.aclose()
 
-                # Upstox returns candles as lists: [timestamp, o, h, l, c, vol, oi]
-                # Normalize to the dict format the engine expects.
+                # Upstox adapter now returns dicts with key "timestamp" (not "time").
+                # The canonical engine key is "time", so we normalise here.
+                # We also handle the legacy list/tuple format for any older code paths.
                 normalized = []
                 for raw in candles:
                     if isinstance(raw, (list, tuple)) and len(raw) >= 6:
                         normalized.append({
-                            "time":          raw[0],   # ISO-8601 string e.g. "2024-09-02T15:29:00+05:30"
-                            "open":          raw[1],
-                            "high":          raw[2],
-                            "low":           raw[3],
-                            "close":         raw[4],
-                            "volume":        raw[5],
-                            "oi":            raw[6] if len(raw) > 6 else None,
-                            "provider":      "upstox",
-                            "sourceType":    "BROKER_AUTHENTICATED",
+                            "time":       raw[0],   # ISO-8601 string e.g. "2024-09-02T15:29:00+05:30"
+                            "open":       raw[1],
+                            "high":       raw[2],
+                            "low":        raw[3],
+                            "close":      raw[4],
+                            "volume":     raw[5],
+                            "oi":         raw[6] if len(raw) > 6 else None,
+                            "provider":   "upstox",
+                            "sourceType": "BROKER_AUTHENTICATED",
                         })
                     elif isinstance(raw, dict):
-                        normalized.append(raw)  # already dict — pass through
+                        # BUG FIX: Upstox adapter returns "timestamp" key; engine expects "time".
+                        # Remap "timestamp" → "time" and "open_interest" → "oi" so
+                        # bulk_upsert_candles can parse the candle time correctly.
+                        if "timestamp" in raw and "time" not in raw:
+                            raw = dict(raw)  # shallow copy to avoid mutating the adapter output
+                            raw["time"] = raw.pop("timestamp")
+                        if "open_interest" in raw and "oi" not in raw:
+                            raw = dict(raw) if not isinstance(raw, dict) else raw
+                            raw["oi"] = raw.get("open_interest")
+                        normalized.append(raw)
                     else:
                         logger.warning(
                             "upstox_unexpected_candle_shape",

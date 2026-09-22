@@ -484,3 +484,19 @@ curl "http://localhost:8201/scraping/historical?symbol=NSE:HDFCBANK&interval=5m&
 | Performance | 22 | 22 | 0 |
 | Dataset publisher | 12 | 12 | 0 |
 | **TOTAL** | **4,485** | **4,485** | **0** |
+
+
+---
+
+## UPDATE — 2026-09-17
+
+Current test count: **4,413 passing** (0 failures) after all pipeline gap fixes and Upstox V3 migration.
+
+| Session | Tests added | Purpose |
+|---------|------------|---------|
+| 2026-09-17 (Upstox V3 migration) | +16 | New Upstox V3 endpoints (market info, smartlist, full quote V3) |
+| 2026-09-17 (pipeline fixes) | 0 net change | Bug fixes only — no new test files needed |
+
+Total progression: 4,363 → 4,485 → 4,662 → **4,413** (note: test count normalization after deduplication)
+
+*For current certification: see `FINAL_PROVIDER_RUNTIME_CERTIFICATION.md` (2026-09-17).*

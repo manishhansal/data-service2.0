@@ -63,20 +63,98 @@ async def _run_worker() -> None:
 
     await logger.ainfo("worker_ready", component="worker")
 
-    # ── Main worker loop ─────────────────────────────────────────────────
-    # Each task group will be populated in later implementation tasks.
-    # For now we just idle until stop signal.
+    # ── Initialise provider adapters for OHLCV catch-up ─────────────────
+    # Pre-authenticate so the catch-up task reuses a single shared session.
+    hist_engine = None
     try:
-        await stop_event.wait()
-    finally:
-        await logger.ainfo("worker_shutting_down", component="worker")
+        from src.engines.historical_engine import HistoricalEngine  # noqa: PLC0415
 
-        if redis is not None:
-            await redis.aclose()
+        hist_engine = HistoricalEngine()
+
+        if (settings.angel_one_api_key and settings.angel_one_client_id
+                and settings.angel_one_totp_secret):
+            try:
+                from src.providers.adapters.angel_one import AngelOneAdapter  # noqa: PLC0415
+                angel = AngelOneAdapter(
+                    api_key=settings.angel_one_api_key,
+                    client_id=settings.angel_one_client_id,
+                    totp_secret=settings.angel_one_totp_secret,
+                    mpin=settings.angel_one_mpin,
+                    redis_client=redis,
+                )
+                await angel.ensure_authenticated()
+                hist_engine._angel_one_adapter = angel
+                await logger.ainfo("worker_angel_one_authenticated")
+            except Exception as exc:  # noqa: BLE001
+                await logger.awarning("worker_angel_one_auth_failed", error=str(exc))
+
+        if settings.upstox_api_key and (settings.upstox_access_token
+                                         or settings.upstox_analytics_key):
+            try:
+                from src.providers.adapters.upstox import UpstoxAdapter  # noqa: PLC0415
+                upstox = UpstoxAdapter(
+                    api_key=settings.upstox_api_key,
+                    api_secret=settings.upstox_api_secret or "",
+                    redirect_uri=(settings.upstox_redirect_uri
+                                  or "http://localhost:8200/v1/auth/upstox/callback"),
+                )
+                if settings.upstox_analytics_key:
+                    await upstox.set_analytics_token(settings.upstox_analytics_key)
+                if settings.upstox_access_token:
+                    await upstox.set_access_token(settings.upstox_access_token)
+                hist_engine._upstox_adapter = upstox
+                await logger.ainfo("worker_upstox_adapter_ready")
+            except Exception as exc:  # noqa: BLE001
+                await logger.awarning("worker_upstox_init_failed", error=str(exc))
+
         if db_engine is not None:
-            await db_engine.dispose()
+            hist_engine._db_engine = db_engine
 
-        await logger.ainfo("worker_stopped", component="worker")
+        await logger.ainfo("worker_historical_engine_ready")
+    except Exception as exc:  # noqa: BLE001
+        await logger.awarning("worker_historical_engine_init_failed", error=str(exc))
+
+    # ── Main worker loop — OHLCV catch-up + graceful shutdown ────────────
+    tasks = []
+
+    if hist_engine is not None and db_engine is not None and redis is not None:
+        from src.worker_tasks.ohlcv_catchup import run_ohlcv_catchup  # noqa: PLC0415
+
+        tasks.append(
+            asyncio.create_task(
+                run_ohlcv_catchup(
+                    db_engine=db_engine,
+                    redis_client=redis,
+                    hist_engine=hist_engine,
+                    stop_event=stop_event,
+                ),
+                name="ohlcv_catchup",
+            )
+        )
+        await logger.ainfo("worker_ohlcv_catchup_task_started")
+    else:
+        await logger.awarning(
+            "worker_ohlcv_catchup_skipped",
+            note="Missing db_engine, redis, or historical_engine — catch-up disabled",
+        )
+
+    # Wait for stop signal
+    await stop_event.wait()
+
+    # Cancel all running tasks gracefully
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    await logger.ainfo("worker_shutting_down", component="worker")
+
+    if redis is not None:
+        await redis.aclose()
+    if db_engine is not None:
+        await db_engine.dispose()
+
+    await logger.ainfo("worker_stopped", component="worker")
 
 
 def main() -> None:

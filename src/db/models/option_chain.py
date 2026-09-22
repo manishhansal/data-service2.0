@@ -39,7 +39,6 @@ _QUALITY_STATUS_CHECK = (
     ")"
 )
 
-
 class OptionChainSnapshot(Base):
     """Point-in-time option chain header record."""
 
@@ -112,7 +111,6 @@ class OptionChainSnapshot(Base):
             f"<OptionChainSnapshot underlying={self.underlying_id!r} "
             f"expiry={self.expiry!r} ts={self.timestamp!r}>"
         )
-
 
 class OptionChainContract(Base):
     """Per-strike row within an OptionChainSnapshot.
@@ -211,7 +209,6 @@ class OptionChainContract(Base):
             f"ltp={self.ltp} iv={self.iv}>"
         )
 
-
 class OptionGreeksSnapshot(Base):
     """IV and Greeks time-series per option instrument.
 
@@ -222,8 +219,12 @@ class OptionGreeksSnapshot(Base):
 
     __tablename__ = "option_greeks_snapshot"
 
-    id: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger(), Identity(), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_key: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True,
+        comment="Provider instrument key (e.g. NSE_FO|43885)",
+    )
     timestamp: Mapped[datetime.datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
     )
@@ -232,6 +233,27 @@ class OptionGreeksSnapshot(Base):
     )
     option_price: Mapped[Optional[float]] = mapped_column(
         Numeric(precision=18, scale=6), nullable=True
+    )
+    # Convenience alias — LTP is semantically clearer for Greeks snapshots
+    ltp: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Last traded price (same as option_price; preferred field name)",
+    )
+    prev_close: Mapped[Optional[float]] = mapped_column(
+        Numeric(precision=18, scale=6), nullable=True,
+        comment="Previous session close price",
+    )
+    oi: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="Open interest — NULL when absent; never zero-substituted",
+    )
+    volume: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="Traded volume today",
+    )
+    ltq: Mapped[Optional[int]] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="Last traded quantity",
     )
     # All Greeks NULL when not available — zero PROHIBITED
     iv: Mapped[Optional[float]] = mapped_column(
@@ -270,7 +292,6 @@ class OptionGreeksSnapshot(Base):
     )
 
     __table_args__ = (
-        {"primary_key": (id, timestamp)},
         CheckConstraint(_QUALITY_STATUS_CHECK, name="ogs_quality_status_valid"),
         Index("ogs_instrument_timestamp", "instrument_id", text("timestamp DESC")),
     )

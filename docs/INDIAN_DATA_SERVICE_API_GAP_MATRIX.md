@@ -1,23 +1,22 @@
 # INDIAN DATA SERVICE API GAP MATRIX
-**Date:** 2026-09-13  
-**Status:** VERIFIED against source code  
-**Purpose:** Maps what AlphaForge needs vs what data-service2.0 currently provides
+**Original date:** 2026-09-13  
+**Updated:** 2026-09-17 — all critical gaps resolved  
+**Status:** RESOLVED — All path incompatibilities fixed; market_quote/option_greeks persistence fixed  
+**Purpose:** Maps what AlphaForge needs vs what data-service2.0 provides
 
 ---
 
-## Critical Finding: API Path Incompatibility
+## ✅ RESOLVED: API Path Incompatibility (2026-09-13)
 
-The single most important gap is a **path mismatch** that prevents data-service2.0 from serving AlphaForge at all:
+The original gap — path mismatch preventing data-service2.0 from serving AlphaForge — was fixed during the 2026-09-13 audit:
 
-| Path called by AlphaForge (ScraplingProvider) | Served by | Status |
+| Path called by AlphaForge | Served by | Status |
 |---|---|---|
-| `GET /scraping/historical` | alpha-forge/data-service (internal) | ❌ WRONG SERVICE |
-| `GET /scraping/quotes` | alpha-forge/data-service (internal) | ❌ WRONG SERVICE |
-| `GET /scraping/option-chain` | alpha-forge/data-service (internal) | ❌ WRONG SERVICE |
-| `GET /scraping/instruments` | alpha-forge/data-service (internal) | ❌ WRONG SERVICE |
+| `GET /scraping/historical` | ~~wrong service~~ | ✅ FIXED — compatibility routes added |
+| `GET /scraping/quotes` | ~~wrong service~~ | ✅ FIXED |
+| `GET /scraping/option-chain` | ~~wrong service~~ | ✅ FIXED |
+| `GET /scraping/instruments` | ~~wrong service~~ | ✅ FIXED |
 | `POST /data/gate` | data-service2.0 | ✅ CONNECTED |
-
-**Fix:** Add `/scraping/*` compatibility routes to data-service2.0 that proxy to the `/v1/india/*` backend. This is the minimal-change approach — no AlphaForge code changes needed to connect ScraplingProvider.
 
 ---
 

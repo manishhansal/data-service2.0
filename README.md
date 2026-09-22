@@ -10,14 +10,20 @@
 **Standalone, production-grade Market Data Platform.**  
 Single market-data authority for AlphaForge. Every market data request flows through this service — no consumer calls an external provider directly.
 
+**Version 2.1.0** · 4,413 unit tests · 5,460,561 equity candles · market_quote + option_greeks + option_chain persistence active
+
 | Document | Purpose |
 |---|---|
 | [`docs/DATA_SERVICE_GUIDE.md`](docs/DATA_SERVICE_GUIDE.md) | Full technical deep-dive: all components, configuration, troubleshooting |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Complete API reference — 61 endpoints across 14 functional groups |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, module map, data flow diagrams |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, module map, data flow diagrams (v2.1.0) |
 | [`ALPHAFORGE_DATA_REQUIREMENTS.md`](ALPHAFORGE_DATA_REQUIREMENTS.md) | AlphaForge integration contract and null semantics |
-| [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) | Authoritative production-readiness status |
+| [`FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) | **Current** runtime certification — live evidence 2026-09-17 |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history — v2.1.0 pipeline fixes + Upstox V3 migration |
+| [`reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) | Detailed runtime certification with all bug fixes |
+| [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) | P0 blocker resolution record (2026-09-15) |
 | [`.env.example`](.env.example) | Annotated reference for every environment variable |
+| [`docker/README-autodeploy.md`](docker/README-autodeploy.md) | Auto-deploy system — git hook + webhook server setup and usage |
 
 ---
 
@@ -39,8 +45,9 @@ Single market-data authority for AlphaForge. Every market data request flows thr
 14. [Running Tests](#14-running-tests)
 15. [Code Quality](#15-code-quality)
 16. [Deployment](#16-deployment)
-17. [Observability](#17-observability)
-18. [Troubleshooting](#18-troubleshooting)
+17. [Auto-Deploy on Git Push](#17-auto-deploy-on-git-push)
+18. [Observability](#18-observability)
+19. [Troubleshooting](#19-troubleshooting)
 
 ---
 
@@ -852,7 +859,90 @@ docker compose --env-file .env.production up -d --scale api=3
 
 ---
 
-## 17. Observability
+## 17. Auto-Deploy on Git Push
+
+The project ships a full auto-deploy system that rebuilds and redeploys the Docker stack automatically after every `git push` to `main`.
+
+### How it works
+
+```
+git push origin main
+       │
+       ▼
+.git/hooks/post-push          ← fires automatically
+       │
+       ▼
+scripts/deploy.sh             ← build → rolling restart → health check
+```
+
+For remote / CI triggers a lightweight webhook server is also included:
+
+```
+GitHub / GitLab push event  →  scripts/webhook_server.py  →  scripts/deploy.sh
+```
+
+### One-time setup
+
+```bash
+chmod +x scripts/setup-autodeploy.sh
+./scripts/setup-autodeploy.sh install
+```
+
+### Daily usage
+
+```bash
+git push origin main          # triggers rebuild + redeploy automatically
+
+# Skip deploy for this push
+SKIP_DEPLOY=1 git push origin main
+
+# Force a full rebuild (no Docker layer cache)
+DEPLOY_NO_CACHE=1 git push origin main
+```
+
+### Management commands
+
+```bash
+./scripts/setup-autodeploy.sh status          # check all components
+./scripts/setup-autodeploy.sh logs            # tail deploy log
+./scripts/setup-autodeploy.sh test-deploy     # manual deploy without a push
+./scripts/setup-autodeploy.sh gen-secret      # generate WEBHOOK_SECRET
+./scripts/setup-autodeploy.sh start-webhook   # start remote webhook receiver
+./scripts/setup-autodeploy.sh stop-webhook    # stop remote webhook receiver
+./scripts/setup-autodeploy.sh uninstall       # remove git hook
+```
+
+### Remote webhook (GitHub / GitLab)
+
+```bash
+# 1. Generate and add secret to .env.production
+./scripts/setup-autodeploy.sh gen-secret
+# → add  WEBHOOK_SECRET=<value>  to .env.production
+
+# 2. Start the server (Docker)
+./scripts/setup-autodeploy.sh start-webhook
+# Listening at http://localhost:9000/webhook
+
+# 3. In GitHub → Settings → Webhooks:
+#    Payload URL:   https://<your-server>:9000/webhook
+#    Content type:  application/json
+#    Secret:        <WEBHOOK_SECRET>
+#    Events:        Just the push event
+```
+
+Full documentation: [`docker/README-autodeploy.md`](docker/README-autodeploy.md)
+
+| File | Purpose |
+|---|---|
+| `scripts/deploy.sh` | Core deploy logic — build, rolling restart, health check, Slack notify |
+| `scripts/webhook_server.py` | HTTP webhook receiver (GitHub HMAC-SHA256 / GitLab token / generic Bearer) |
+| `scripts/setup-autodeploy.sh` | Management CLI |
+| `.git/hooks/post-push` | Git hook that fires on every `git push` |
+| `docker/webhook/docker-compose.webhook.yml` | Runs webhook server as a Docker container |
+
+---
+
+## 18. Observability
 
 | Signal | Endpoint / Method | Details |
 |---|---|---|
@@ -864,7 +954,7 @@ docker compose --env-file .env.production up -d --scale api=3
 
 ---
 
-## 18. Troubleshooting
+## 19. Troubleshooting
 
 ### Container keeps restarting
 

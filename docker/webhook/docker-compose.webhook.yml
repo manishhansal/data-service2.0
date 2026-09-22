@@ -1,0 +1,71 @@
+# =============================================================================
+# docker-compose.webhook.yml — Webhook server for auto-deploy
+#
+# Runs the webhook receiver as a Docker service so it survives reboots
+# and is isolated from the host Python environment.
+#
+# Usage (from project root):
+#   docker compose -f docker/webhook/docker-compose.webhook.yml --env-file .env.production up -d
+#
+# The webhook server listens on WEBHOOK_PORT (default 9000).
+# Pair it with a reverse proxy (nginx/caddy) for TLS termination.
+# =============================================================================
+
+services:
+  webhook:
+    image: python:3.11-slim
+    container_name: data-service-webhook
+    restart: unless-stopped
+    working_dir: /app
+
+    # Mount the project directory (read-only for src, rw for .git logs and deploy)
+    volumes:
+      - ../../scripts:/app/scripts:ro
+      - ../../.git:/app/.git:rw
+      # Mount the Docker socket so deploy.sh can call docker compose
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount project root for docker-compose.yml and env files
+      - ../..:/project:rw
+
+    # Override working dir for deploy.sh to resolve relative paths correctly
+    environment:
+      WEBHOOK_HOST:      "0.0.0.0"
+      WEBHOOK_PORT:      "${WEBHOOK_PORT:-9000}"
+      WEBHOOK_SECRET:    "${WEBHOOK_SECRET}"
+      DEPLOY_BRANCH:     "${DEPLOY_BRANCH:-main}"
+      DEPLOY_SCRIPT:     "/app/scripts/deploy.sh"
+      DEPLOY_LOG_FILE:   "/app/.git/deploy.log"
+      # Let deploy.sh find docker-compose.yml via PROJECT_DIR
+      PROJECT_DIR:       "/project"
+
+    ports:
+      - "${WEBHOOK_PORT:-9000}:9000"
+
+    # Install docker CLI inside the container so deploy.sh can call it
+    command: >
+      bash -c "
+        apt-get update -qq &&
+        apt-get install -y --no-install-recommends docker.io curl git &&
+        rm -rf /var/lib/apt/lists/* &&
+        chmod +x /app/scripts/deploy.sh &&
+        python /app/scripts/webhook_server.py
+      "
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${WEBHOOK_PORT:-9000}/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+    networks:
+      - data-service-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+networks:
+  data-service-net:
+    external: true      # must already exist (created by docker-compose.yml)

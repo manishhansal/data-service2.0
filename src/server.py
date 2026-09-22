@@ -99,20 +99,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
 
     # ── Upstox adapter (historical OHLCV, live quotes, index intraday) ──────────
-    # Uses the pre-obtained OAuth access token from UPSTOX_ACCESS_TOKEN env var.
-    # When present the adapter is ready immediately — no OAuth round-trip needed.
+    # Supports both OAuth access token (daily rotation) and Analytics Token
+    # (1-year validity). Analytics token alone is sufficient for historical/quote
+    # calls. access_token is needed for intraday and WebSocket.
     app.state.upstox_adapter = None
-    if settings.upstox_access_token and settings.upstox_api_key:
+    _upstox_has_token = bool(settings.upstox_access_token or settings.upstox_analytics_key)
+    if _upstox_has_token and settings.upstox_api_key:
         try:
             from src.providers.adapters.upstox import UpstoxAdapter  # noqa: PLC0415
             upstox_adapter = UpstoxAdapter(
                 api_key=settings.upstox_api_key,
                 api_secret=settings.upstox_api_secret or "",
                 redirect_uri=settings.upstox_redirect_uri or "http://localhost:8200/v1/auth/upstox/callback",
+                redis_client=getattr(app.state, "redis_client", None),
             )
-            await upstox_adapter.set_access_token(settings.upstox_access_token)
+            # Load any token stored in Redis by a peer worker first
+            await upstox_adapter.load_tokens_from_redis()
+            if settings.upstox_analytics_key:
+                await upstox_adapter.set_analytics_token(settings.upstox_analytics_key)
+            if settings.upstox_access_token:
+                await upstox_adapter.set_access_token(settings.upstox_access_token)
             app.state.upstox_adapter = upstox_adapter
-            await logger.ainfo("upstox_adapter_ready", provider="upstox")
+            await logger.ainfo(
+                "upstox_adapter_ready",
+                provider="upstox",
+                has_access_token=bool(settings.upstox_access_token),
+                has_analytics_token=bool(settings.upstox_analytics_key),
+            )
         except Exception as exc:  # noqa: BLE001
             await logger.awarning(
                 "upstox_adapter_init_failed",
@@ -122,7 +135,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         await logger.awarning(
             "upstox_credentials_not_configured",
-            note="Set UPSTOX_ACCESS_TOKEN and UPSTOX_API_KEY for Upstox data",
+            note="Set UPSTOX_ACCESS_TOKEN or UPSTOX_ANALYTICS_KEY + UPSTOX_API_KEY for Upstox data",
             degraded=True,
         )
 
@@ -150,6 +163,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "instrument_master_loaded",
                 instrument_count=len(im_service._instruments),
             )
+            # ── Inject into MarketEngine so live quote token resolution works ──
+            if hasattr(app.state, "market_engine") and app.state.market_engine is not None:
+                app.state.market_engine.set_instrument_master(im_service)
+                await logger.ainfo("market_engine_instrument_master_injected")
+            # Inject DB engine for market_quote persistence
+            if hasattr(app.state, "market_engine") and app.state.market_engine is not None:
+                app.state.market_engine.set_db_engine(app.state.db_engine)
+                await logger.ainfo("market_engine_db_engine_injected")
         except Exception as exc:  # noqa: BLE001
             await logger.awarning(
                 "instrument_master_load_failed",
@@ -174,12 +195,97 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:  # noqa: BLE001
         await logger.awarning("historical_engine_init_failed", error=str(exc))
 
+    # ── DualProviderEngine — inject db_engine if available ────────────────
+    if app.state.db_engine is not None:
+        try:
+            from src.engines.dual_provider_engine import DualProviderEngine  # noqa: PLC0415
+            dual_engine = DualProviderEngine(
+                angel_one_adapter=app.state.angel_one_adapter,
+                upstox_adapter=app.state.upstox_adapter,
+            )
+            dual_engine.set_db_engine(app.state.db_engine)
+            app.state.dual_provider_engine = dual_engine
+            await logger.ainfo("dual_provider_engine_ready")
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning("dual_provider_engine_init_failed", error=str(exc))
+
     await logger.ainfo("data_service_ready", version="2.0.0")
+
+    # ── Streaming pipeline: CandleBuilder + TickPersister ────────────────────
+    # Wire stream adapters to the TickPersister which feeds the CandleBuilder.
+    # This activates the market_tick → equity_candle persistence path.
+    app.state.candle_builder = None
+    app.state.tick_persister = None
+    app.state.angel_one_stream = None
+    app.state.upstox_stream = None
+    if app.state.db_engine is not None:
+        try:
+            from src.engines.candle_builder import CandleBuilder  # noqa: PLC0415
+            from src.engines.tick_persister import TickPersister  # noqa: PLC0415
+            candle_builder = CandleBuilder(intervals=["1m", "5m", "10m", "15m", "30m", "1h"])
+            tick_persister = TickPersister(
+                db_engine=app.state.db_engine,
+                candle_builder=candle_builder,
+                provider="live_stream",
+                batch_size=50,
+                flush_interval=2.0,
+            )
+            app.state.candle_builder = candle_builder
+            app.state.tick_persister = tick_persister
+            await logger.ainfo(
+                "streaming_pipeline_ready",
+                intervals=["1m", "5m", "10m", "15m", "30m", "1h"],
+            )
+
+            # Wire Angel One SmartStream → TickPersister
+            if app.state.angel_one_adapter is not None:
+                try:
+                    from src.providers.streams.angel_one_stream import AngelOneStreamAdapter  # noqa: PLC0415
+                    angel_stream = AngelOneStreamAdapter()
+
+                    async def _angel_on_tick(tick: dict) -> None:
+                        tick["provider"] = "angel_one"
+                        tick["sourceType"] = "LIVE_WEBSOCKET"
+                        await tick_persister.on_tick(tick)
+
+                    angel_stream.on_tick_callback = _angel_on_tick
+                    app.state.angel_one_stream = angel_stream
+                    await logger.ainfo("angel_one_stream_adapter_wired")
+                except Exception as exc:  # noqa: BLE001
+                    await logger.awarning("angel_one_stream_wire_failed", error=str(exc))
+
+            # Wire Upstox WebSocket → TickPersister
+            if app.state.upstox_adapter is not None:
+                try:
+                    from src.providers.streams.upstox_stream import UpstoxStreamAdapter  # noqa: PLC0415
+                    upstox_stream = UpstoxStreamAdapter()
+
+                    async def _upstox_on_tick(tick: dict) -> None:
+                        tick["provider"] = "upstox"
+                        tick["sourceType"] = "LIVE_WEBSOCKET"
+                        await tick_persister.on_tick(tick)
+
+                    upstox_stream.on_tick_callback = _upstox_on_tick
+                    app.state.upstox_stream = upstox_stream
+                    await logger.ainfo("upstox_stream_adapter_wired")
+                except Exception as exc:  # noqa: BLE001
+                    await logger.awarning("upstox_stream_wire_failed", error=str(exc))
+
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning("streaming_pipeline_init_failed", error=str(exc))
 
     yield  # ── Application running ────────────────────────────────────────
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     await logger.ainfo("data_service_shutting_down")
+
+    # Flush streaming pipeline buffers
+    if getattr(app.state, "tick_persister", None) is not None:
+        try:
+            await app.state.tick_persister.shutdown()
+            await logger.ainfo("tick_persister_flushed")
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning("tick_persister_shutdown_error", error=str(exc))
 
     # Flush and shut down OpenTelemetry spans
     from src.observability.tracing import shutdown_tracing  # noqa: PLC0415
@@ -240,6 +346,16 @@ def create_app() -> FastAPI:
 
     app.add_middleware(CredentialStripperMiddleware)
 
+    # ── Consumer inbound rate limiting (Req 13.3) ─────────────────────────
+    # Soft-limits inbound API traffic per consumer IP.
+    # Exempt: /v1/health/live, /metrics (no Redis dependency for health checks).
+    # Configurable via CONSUMER_RATE_LIMIT and CONSUMER_RATE_WINDOW_SEC env vars.
+    from src.middleware.rate_limiter import RateLimitMiddleware  # noqa: PLC0415
+
+    _rl_limit = settings.consumer_rate_limit
+    _rl_window = settings.consumer_rate_window_sec
+    app.add_middleware(RateLimitMiddleware, limit=_rl_limit, window_sec=_rl_window)
+
     # ── Routers (registered here; implemented in later tasks) ────────────
     _register_routers(app)
 
@@ -256,6 +372,7 @@ def _register_routers(app: FastAPI) -> None:
     _try_include(app, "src.api.health", prefix="", tags=["Health"])
     _try_include(app, "src.api.metrics", prefix="", tags=["Metrics"])
     _try_include(app, "src.auth.consumer_auth", prefix="/v1", tags=["Auth"])
+    _try_include(app, "src.api.upstox_auth", prefix="/v1", tags=["Auth"])
     # ── AlphaForge ScraplingProvider compatibility routes (unauthenticated) ──
     # These /scraping/* endpoints translate AlphaForge's ScraplingProvider
     # calls into data-service2.0 backend logic.  They do NOT require API key

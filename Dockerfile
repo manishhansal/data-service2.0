@@ -65,6 +65,7 @@ COPY --from=builder /install /usr/local
 # Copy application source code.
 COPY src/ ./src/
 COPY alembic/ ./alembic/
+COPY scripts/ ./scripts/
 
 # ---------------------------------------------------------------------------
 # Non-root user (Requirement 19.1 — least-privilege execution)

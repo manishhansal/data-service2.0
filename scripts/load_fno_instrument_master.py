@@ -158,12 +158,24 @@ def _build_instrument_record(row: dict) -> dict | None:
 
     underlying = name  # e.g. 'RELIANCE', 'NIFTY'
 
+    # ISIN — present for stock F&O, typically absent for index F&O.
+    isin = row.get("isin") or None
+    if isin and isin.strip() == "":
+        isin = None
+
+    # Upstox NFO key — format: NSE_FO|{angel_token}
+    # Upstox uses the same numeric token ID as Angel One for NFO contracts.
+    # Reference: Upstox V3 historical candle API accepts NSE_FO|{token} for
+    # all currently-active NFO contracts (futures and options).
+    angel_token_val = row.get("token")
+    upstox_key = f"NSE_FO|{angel_token_val}" if angel_token_val else None
+
     return {
         "instrument_id": instrument_id,
         "trading_symbol": symbol,
         "display_symbol": symbol,
         "name": row.get("name", ""),
-        "isin": None,
+        "isin": isin,
         "exchange": "NFO",
         "segment": segment,
         "instrument_type": instrument_type,
@@ -184,8 +196,8 @@ def _build_instrument_record(row: dict) -> dict | None:
         "active_to": expiry,              # contract expires on expiry date
         "angel_token": row.get("token"),
         "angel_symbol": symbol,
-        "upstox_key": None,
-        "upstox_symbol": None,
+        "upstox_key": upstox_key,
+        "upstox_symbol": symbol,
     }
 
 
@@ -217,6 +229,8 @@ ON CONFLICT (instrument_id) DO UPDATE SET
     active_to       = EXCLUDED.active_to,
     angel_token     = EXCLUDED.angel_token,
     angel_symbol    = EXCLUDED.angel_symbol,
+    upstox_key      = COALESCE(EXCLUDED.upstox_key, instrument_master.upstox_key),
+    upstox_symbol   = COALESCE(EXCLUDED.upstox_symbol, instrument_master.upstox_symbol),
     instrument_class= EXCLUDED.instrument_class,
     updated_at      = NOW()
 """)
@@ -227,6 +241,29 @@ INSERT INTO instrument_provider_mapping (
     provider_symbol, exchange_segment, valid_from, is_active
 ) VALUES (
     :instrument_id, 'angel_one', :token,
+    :symbol, 'NFO_FO', :valid_from, TRUE
+)
+ON CONFLICT (instrument_id, provider, valid_from) DO UPDATE SET
+    provider_instrument_id = EXCLUDED.provider_instrument_id,
+    provider_symbol        = EXCLUDED.provider_symbol,
+    is_active              = TRUE,
+    updated_at             = NOW()
+""")
+
+# Upstox NFO futures/options key format: NFO_FO|{ISIN}
+# Upstox requires the ISIN-based key for NFO instruments, exactly as returned
+# by the Upstox instruments CSV/JSON. We derive it from the ISIN field in the
+# Angel One scrip master (field "isin" — present for stock F&O, NULL for index F&O).
+# Index futures (NIFTY, BANKNIFTY etc.) use a different key format:
+#   NFO_INDEX_OPT|{ISIN} for index options
+#   NFO_FO|{ISIN} for index futures with a known ISIN
+# For index contracts where ISIN is absent we fall back to None (handled gracefully).
+UPSERT_UPSTOX_MAPPING_SQL = text("""
+INSERT INTO instrument_provider_mapping (
+    instrument_id, provider, provider_instrument_id,
+    provider_symbol, exchange_segment, valid_from, is_active
+) VALUES (
+    :instrument_id, 'upstox', :upstox_key,
     :symbol, 'NFO_FO', :valid_from, TRUE
 )
 ON CONFLICT (instrument_id, provider, valid_from) DO UPDATE SET
@@ -291,16 +328,19 @@ async def run(dry_run: bool = False, limit: int | None = None) -> dict:
         print(f"  OPTSTK: {sum(1 for r in records if r['instrument_type']=='OPTSTK'):,}")
         print(f"  OPTIDX: {sum(1 for r in records if r['instrument_type']=='OPTIDX'):,}")
         print(f"  Skipped (malformed): {skipped:,}")
+        print(f"  With ISIN (Upstox key derivable): {sum(1 for r in records if r.get('upstox_key')):,}")
         # Show sample
         for rec in records[:3]:
             print(f"  Sample: {rec['instrument_id']} expiry={rec['expiry']} "
-                  f"strike={rec['strike']} token={rec['angel_token']}")
+                  f"strike={rec['strike']} token={rec['angel_token']} "
+                  f"upstox_key={rec['upstox_key']}")
         await engine.dispose()
         return {"dry_run": True, "would_upsert": len(records)}
 
     # Batch upsert in chunks of 1000 for performance
     inserted = 0
     mappings_inserted = 0
+    upstox_mappings_inserted = 0
     batch_size = 1000
 
     async with engine.begin() as conn:
@@ -308,15 +348,24 @@ async def run(dry_run: bool = False, limit: int | None = None) -> dict:
             batch = records[i:i + batch_size]
             for rec in batch:
                 await conn.execute(UPSERT_INSTRUMENT_SQL, rec)
-                # Also upsert provider mapping if token present
+                # Angel One provider mapping
                 if rec.get("angel_token"):
                     await conn.execute(UPSERT_MAPPING_SQL, {
                         "instrument_id": rec["instrument_id"],
                         "token": rec["angel_token"],
                         "symbol": rec["trading_symbol"],
-                        "valid_from": date(2020, 1, 1),  # consistent with active_from
+                        "valid_from": date(2020, 1, 1),
                     })
                     mappings_inserted += 1
+                # Upstox provider mapping (only when ISIN is available)
+                if rec.get("upstox_key"):
+                    await conn.execute(UPSERT_UPSTOX_MAPPING_SQL, {
+                        "instrument_id": rec["instrument_id"],
+                        "upstox_key": rec["upstox_key"],
+                        "symbol": rec["trading_symbol"],
+                        "valid_from": date(2020, 1, 1),
+                    })
+                    upstox_mappings_inserted += 1
                 inserted += 1
 
             await logger.ainfo(
@@ -344,6 +393,7 @@ async def run(dry_run: bool = False, limit: int | None = None) -> dict:
         "dry_run": False,
         "upserted": inserted,
         "mappings": mappings_inserted,
+        "upstox_mappings": upstox_mappings_inserted,
         "instrument_master_total": im_total,
         "instrument_master_fut": im_fut,
         "instrument_master_opt": im_opt,
@@ -366,7 +416,8 @@ async def _main() -> int:
     print("  F&O INSTRUMENT MASTER LOAD COMPLETE")
     print(f"{'='*60}")
     print(f"  F&O instruments upserted: {result['upserted']:,}")
-    print(f"  Provider mappings:        {result['mappings']:,}")
+    print(f"  Angel One mappings:       {result['mappings']:,}")
+    print(f"  Upstox mappings:          {result['upstox_mappings']:,}")
     print(f"  instrument_master total:  {result['instrument_master_total']:,}")
     print(f"    FUT:                    {result['instrument_master_fut']:,}")
     print(f"    OPT:                    {result['instrument_master_opt']:,}")

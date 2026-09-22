@@ -182,11 +182,19 @@ class TestFetchHistoricalOHLCV:
             "NSE_EQ|INE002A01018", "2024-01-15", "2024-01-15", "1m"
         )
 
-        assert result == fake_candles
+        # V3 adapter returns normalized dicts with named keys, not raw arrays
+        assert len(result) == 2
+        assert result[0]["timestamp"] == "2024-01-15T09:15:00+05:30"
+        assert result[0]["open"] == 500.0
+        assert result[0]["close"] == 503.0
+        assert result[0]["volume"] == 100000
+        assert result[0]["open_interest"] == 0
+        assert result[0]["provider"] == "upstox"
+        assert result[0]["api_version"] == "v3"
 
     @pytest.mark.parametrize("interval", ["1m", "5m", "10m", "15m", "30m", "1h", "1d"])
     async def test_uses_correct_api_interval_in_url(self, interval: str) -> None:
-        """The Upstox API interval string must appear in the request URL."""
+        """The V3 unit/interval path must appear in the request URL."""
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.request.return_value = _mock_response(
             200, _candles_response([])
@@ -200,11 +208,17 @@ class TestFetchHistoricalOHLCV:
 
         call_args = mock_client.request.call_args
         called_url: str = call_args[0][1]  # positional: method, url
-        expected_api_interval = INTERVAL_MAP[interval]
-        assert expected_api_interval in called_url, (
-            f"Expected {expected_api_interval!r} in URL for interval {interval!r}; "
-            f"got {called_url!r}"
+        # V3 URL contains unit/interval_value path segments
+        from src.providers.adapters.upstox import INTERVAL_MAP_V3
+        unit, interval_value = INTERVAL_MAP_V3[interval]
+        assert unit in called_url, (
+            f"Expected unit {unit!r} in URL for interval {interval!r}; got {called_url!r}"
         )
+        assert str(interval_value) in called_url, (
+            f"Expected interval_value {interval_value!r} in URL; got {called_url!r}"
+        )
+        # Must be V3 URL
+        assert "/v3/historical-candle" in called_url
 
     async def test_request_uses_bearer_token(self) -> None:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
@@ -273,16 +287,11 @@ class TestHttp401SuccessCase:
         ]
         mock_client = AsyncMock(spec=httpx.AsyncClient)
 
-        # First call returns 401; second call (after refresh) returns 200.
         token_refresh_response = _mock_response(
             200, {"access_token": "refreshed-token"}
         )
         ok_response = _mock_response(200, _candles_response(fake_candles))
 
-        # client.request: first → 401, then (for token refresh POST) → 200 token,
-        # then → 200 data.
-        # But refresh_token uses client.post, not client.request.
-        # Simulate: request → 401, post (refresh) → 200 with token, request → 200 data.
         mock_client.request.side_effect = [
             _mock_response(401, {}),  # initial request → 401
             ok_response,              # retry after refresh → 200
@@ -296,7 +305,10 @@ class TestHttp401SuccessCase:
             "NSE_EQ|INE002A01018", "2024-01-15", "2024-01-15", "1m"
         )
 
-        assert result == fake_candles
+        # V3 returns normalized dicts
+        assert len(result) == 1
+        assert result[0]["open"] == 500.0
+        assert result[0]["close"] == 503.0
         # Exactly two request() calls were made.
         assert mock_client.request.call_count == 2
         # Token refresh (POST) was called exactly once.
@@ -404,7 +416,7 @@ class TestHttp401FailureCase:
         adapter = _make_adapter()
         # Do NOT call set_access_token — adapter has no token.
 
-        with pytest.raises(ProviderAuthError, match="No Upstox access token set"):
+        with pytest.raises(ProviderAuthError, match="No Upstox"):
             await adapter.ensure_authenticated()
 
 
@@ -513,7 +525,8 @@ class TestFetchLiveQuote:
 
         call_args = mock_client.request.call_args
         called_url: str = call_args[0][1]
-        assert "market-quote/quotes" in called_url
+        # V3 endpoint must be used (migrated April 2025)
+        assert "v3/market-quote/quotes" in called_url
 
     async def test_live_quote_passes_instrument_key_as_param(self) -> None:
         instrument_key = "NSE_IDX|Nifty 50"
@@ -774,3 +787,313 @@ class TestLifecycle:
             pass
 
         mock_client.aclose.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Market Information APIs (launched May 2026)
+# ---------------------------------------------------------------------------
+
+
+class TestMarketInformationApis:
+    """Verify Market Information endpoints call correct V2 URLs."""
+
+    async def test_fetch_oi_data_url_and_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"strikes": []}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_oi_data(
+            "NSE_INDEX|Nifty 50", "2026-09-29", "2026-09-17"
+        )
+
+        call_args = mock_client.request.call_args
+        called_url: str = call_args[0][1]
+        assert "v2/market/oi" in called_url
+        params: dict = call_args.kwargs.get("params", {})
+        assert params["instrument_key"] == "NSE_INDEX|Nifty 50"
+        assert params["expiry"] == "2026-09-29"
+        assert params["date"] == "2026-09-17"
+        assert isinstance(result, dict)
+
+    async def test_fetch_pcr_data_url_and_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"pcr_series": []}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_pcr_data(
+            "NSE_INDEX|Nifty 50", "2026-09-29", "2026-09-17", 30
+        )
+
+        call_args = mock_client.request.call_args
+        called_url: str = call_args[0][1]
+        assert "v2/market/pcr" in called_url
+        params: dict = call_args.kwargs.get("params", {})
+        assert params["bucket_interval"] == 30
+        assert isinstance(result, dict)
+
+    async def test_fetch_max_pain_url_and_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"max_pain_strike": 23000}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_max_pain(
+            "NSE_INDEX|Nifty 50", "2026-09-29", "2026-09-17", 15
+        )
+
+        call_args = mock_client.request.call_args
+        called_url: str = call_args[0][1]
+        assert "v2/market/max-pain" in called_url
+        params: dict = call_args.kwargs.get("params", {})
+        assert params["bucket_interval"] == 15
+        assert isinstance(result, dict)
+
+    async def test_fetch_change_oi_url_and_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"change_oi": []}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_change_oi(
+            "NSE_INDEX|Nifty 50", "2026-09-29", "2026-09-17", 1
+        )
+
+        call_args = mock_client.request.call_args
+        called_url: str = call_args[0][1]
+        assert "v2/market/change-oi" in called_url
+        params: dict = call_args.kwargs.get("params", {})
+        assert params["interval"] == 1
+        assert isinstance(result, dict)
+
+    async def test_fetch_fii_data_url_and_required_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"fii": []}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_fii_data("NSE_FO|INDEX_FUTURES", "1D")
+
+        call_args = mock_client.request.call_args
+        called_url: str = call_args[0][1]
+        assert "v2/market/fii" in called_url
+        params: dict = call_args.kwargs.get("params", {})
+        assert params["data_type"] == "NSE_FO|INDEX_FUTURES"
+        assert params["interval"] == "1D"
+        assert "from" not in params  # from_date not passed
+        assert isinstance(result, dict)
+
+    async def test_fetch_fii_data_optional_from_date(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        await adapter.fetch_fii_data("NSE_EQ|CASH", "1M", from_date="2026-01-01")
+
+        params: dict = mock_client.request.call_args.kwargs.get("params", {})
+        assert params["from"] == "2026-01-01"
+
+    async def test_fetch_dii_data_url_and_required_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"dii": []}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_dii_data("NSE_EQ|CASH", "1D")
+
+        call_args = mock_client.request.call_args
+        called_url: str = call_args[0][1]
+        assert "v2/market/dii" in called_url
+        params: dict = call_args.kwargs.get("params", {})
+        assert params["data_type"] == "NSE_EQ|CASH"
+        assert params["interval"] == "1D"
+        assert isinstance(result, dict)
+
+    async def test_market_info_empty_data_returns_empty_dict(self) -> None:
+        """Provider returning null/missing data → empty dict, no exception."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": None}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_oi_data("key", "2026-09-29", "2026-09-17")
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Smartlist APIs (launched May 2026)
+# ---------------------------------------------------------------------------
+
+
+class TestSmartlistApis:
+    """Verify Smartlist endpoints call correct V2 URLs with optional params."""
+
+    async def test_fetch_smartlist_futures_no_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"items": []}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_smartlist_futures()
+
+        call_args = mock_client.request.call_args
+        called_url: str = call_args[0][1]
+        assert "v2/market/smartlist/futures" in called_url
+        params: dict = call_args.kwargs.get("params", {})
+        # No optional params should be present
+        assert "asset_type" not in params
+        assert "category" not in params
+        assert isinstance(result, dict)
+
+    async def test_fetch_smartlist_futures_with_all_params(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        await adapter.fetch_smartlist_futures(
+            asset_type="INDEX", category="OI_GAINERS",
+            page_number=1, page_size=20
+        )
+
+        params: dict = mock_client.request.call_args.kwargs.get("params", {})
+        assert params["asset_type"] == "INDEX"
+        assert params["category"] == "OI_GAINERS"
+        assert params["page_number"] == 1
+        assert params["page_size"] == 20
+
+    async def test_fetch_smartlist_options_url(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        await adapter.fetch_smartlist_options(asset_type="STOCK", category="IV_GAINERS")
+
+        called_url: str = mock_client.request.call_args[0][1]
+        assert "v2/market/smartlist/options" in called_url
+        params: dict = mock_client.request.call_args.kwargs.get("params", {})
+        assert params["asset_type"] == "STOCK"
+        assert params["category"] == "IV_GAINERS"
+
+    async def test_fetch_smartlist_mtf_url(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {"items": []}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_smartlist_mtf(page_number=2, page_size=50)
+
+        called_url: str = mock_client.request.call_args[0][1]
+        assert "v2/market/smartlist/mtf" in called_url
+        params: dict = mock_client.request.call_args.kwargs.get("params", {})
+        assert params["page_number"] == 2
+        assert params["page_size"] == 50
+        assert isinstance(result, dict)
+
+    async def test_smartlist_empty_data_returns_empty_dict(self) -> None:
+        """Provider returning null data field → empty dict, no exception."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": None}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("tok")
+
+        result = await adapter.fetch_smartlist_futures()
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Full quote V3 migration verification
+# ---------------------------------------------------------------------------
+
+
+class TestFullQuoteV3Migration:
+    """Verify fetch_full_quote now calls the V3 endpoint."""
+
+    async def test_full_quote_uses_v3_url(self) -> None:
+        """fetch_full_quote must call /v3/market-quote/quotes, not V2."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("valid-token")
+
+        await adapter.fetch_full_quote(["NSE_EQ|INE002A01018"])
+
+        called_url: str = mock_client.request.call_args[0][1]
+        assert "v3/market-quote/quotes" in called_url
+        assert "v2/market-quote/quotes" not in called_url
+
+    async def test_full_quote_v3_returns_data(self) -> None:
+        instrument_key = "NSE_EQ|INE002A01018"
+        fake_quote = {
+            "last_price": 1244.5,
+            "volume": 1_200_000,
+            "oi": 0.0,
+        }
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {instrument_key: fake_quote}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("valid-token")
+
+        result = await adapter.fetch_full_quote([instrument_key])
+
+        assert result[instrument_key] == fake_quote
+
+    async def test_full_quote_v3_accepts_cas_fields(self) -> None:
+        """V3 full quote response with CAS fields must pass through unchanged."""
+        instrument_key = "NSE_EQ|INE002A01018"
+        fake_quote = {
+            "last_price": 1244.5,
+            "cas": {
+                "iep": 1243.0,
+                "ieq": "5000",
+                "iiq_total": "200",
+                "iiq_m": "50",
+                "rp": "1244.0",
+                "cas_eligible": True,
+            },
+        }
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = _mock_response(
+            200, {"status": "success", "data": {instrument_key: fake_quote}}
+        )
+        adapter = _make_adapter(mock_client)
+        await adapter.set_access_token("valid-token")
+
+        result = await adapter.fetch_full_quote([instrument_key])
+
+        # CAS fields must not be stripped
+        assert result[instrument_key]["cas"]["iep"] == 1243.0
+        assert result[instrument_key]["cas"]["cas_eligible"] is True

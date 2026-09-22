@@ -1,8 +1,9 @@
 # INDIAN MARKET QUERY PERFORMANCE REPORT
-**Generated:** 2026-09-15  
+**Generated:** 2026-09-15 (baseline measurements)  
+**Updated note:** Data volume as of 2026-09-17 = **5,460,561** rows, 9 intervals (1m/5m/10m/15m/30m/1h/1d/1w/1M).  
 **Database:** PostgreSQL 15.18 / TimescaleDB 2.28.3  
 **Hardware:** Apple M-series (aarch64), Docker container (data-service-postgres)  
-**Data volume:** equity_candle = 5,425,719 rows, 71 TimescaleDB 7-day chunks
+**Data volume at measurement time:** equity_candle = 5,425,719 rows, 71 TimescaleDB 7-day chunks
 
 All timings are actual `Execution Time` from `EXPLAIN (ANALYZE)` on a warm database (after one prior cold run to populate OS cache).
 

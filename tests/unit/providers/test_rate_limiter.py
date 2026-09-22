@@ -115,7 +115,8 @@ class TestProviderRateLimits:
         assert PROVIDER_RATE_LIMITS[ProviderId.ANGEL_ONE.value] == 3.0
 
     def test_upstox_10_rps(self) -> None:
-        assert PROVIDER_RATE_LIMITS[ProviderId.UPSTOX.value] == 10.0
+        # Updated to 50 req/s per NSE circular May 2025 (was incorrectly 10)
+        assert PROVIDER_RATE_LIMITS[ProviderId.UPSTOX.value] == 50.0
 
     def test_scrapling_nse_2_rps(self) -> None:
         assert PROVIDER_RATE_LIMITS[ProviderId.SCRAPLING_NSE.value] == 2.0
