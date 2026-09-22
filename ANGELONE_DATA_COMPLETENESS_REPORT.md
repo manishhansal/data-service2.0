@@ -1,7 +1,7 @@
 # ANGEL ONE DATA COMPLETENESS REPORT
 ## data-service2.0 — AlphaForge Market Data Platform
 
-**Report Date:** 2026-09-16  
+**Report Date:** 2026-09-16 *(see UPDATE — 2026-09-22 for v2.2.0 changes)*  
 **Provider:** Angel One SmartAPI  
 **Audit Type:** Static code analysis + API documentation cross-reference  
 **Live Verification:** Requires credentials — NOT_VERIFIED without live credentials
@@ -193,3 +193,21 @@
 | Live verification | Auth re-confirmed; RELIANCE ltp=1240.6 in market_quote; HDFCBANK ltp=714.1 in market_quote; option_greeks 328 contracts confirmed |
 
 *Unit tests: 4,413 passing (0 failures) as of 2026-09-17.*
+
+---
+
+## UPDATE — 2026-09-22 (v2.2.0)
+
+| Change | Detail |
+|--------|--------|
+| 5y intraday backfill COMPLETE | ~123M equity candle rows; 298 instruments; Nifty50: full 5y; F&O universe: ~2y (Upstox plan limit) |
+| fo_universe table seeded | 314 rows (293 active, 21 retired); used by catch-up worker as instrument source |
+| Angel One → Upstox auto-fallback | `angel_one_token_unknown_upstox_fallback` fires for 301 symbol ISIN-mapped instruments |
+| OHLCV catch-up worker uses Angel One | IDX intraday intervals route to Angel One (`1m`–`1h`); Upstox used only for EOD |
+| 1M monthly not available | Unchanged — Angel One does not support monthly candles |
+| Historical OI plan restriction | `getOIData` still returns "Invalid Bad Request" (BLOCKED_BY_EXTERNAL — plan restriction) |
+| Catch-up worker for Angel One | Worker calls `HistoricalEngine.run_backfill()` per-instrument per-interval from last Redis checkpoint |
+
+**Angel One intraday depth for indices:** NSE index instruments (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, etc.) use Angel One as the intraday provider, since Upstox returns `UDAPI100011` for all `NSE_INDEX` instruments at `1m`–`1h`. Angel One provides index token-based intraday data. `MIDCPNIFTY` is available on Angel One but not Upstox.
+
+*Unit tests: 4,821+ passing (0 failures) as of 2026-09-22.*

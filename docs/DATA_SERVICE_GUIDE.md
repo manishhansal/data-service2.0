@@ -1,12 +1,13 @@
 # DATA-SERVICE 2.0 — Complete Technical Guide
 
-> **Version:** 2.1.0 · **Port:** 8200 · **Language:** Python 3.11+  
+> **Version:** 2.2.0 · **Port:** 8200 · **Language:** Python 3.11+  
 > This is the authoritative internal reference for DATA-SERVICE 2.0.  
 > For the AlphaForge integration contract see [`ALPHAFORGE_DATA_REQUIREMENTS.md`](../ALPHAFORGE_DATA_REQUIREMENTS.md).  
-> **Last updated:** 2026-09-17 — Upstox V3 migration; persistence gaps fixed; 4,413 unit tests  
-> For production-readiness certification see [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](../reports/20_FINAL_PRODUCTION_CERTIFICATION.md).  
+> **Last updated:** 2026-09-22 — v2.2.0: 5y backfill, fo_universe, OHLCV catch-up worker, IDX routing fix; 4,821+ unit tests  
+> For production-readiness certification see [`PRODUCTION_CERTIFICATION_STATUS.md`](../PRODUCTION_CERTIFICATION_STATUS.md).  
+> For ML data certification see [`ML_DATA_CERTIFICATION.md`](../ML_DATA_CERTIFICATION.md).  
 > For system architecture see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).  
-> ⚠️ `PRODUCTION_CERTIFICATION.md` in the repo root has been **revoked** — refer to `reports/20_FINAL_PRODUCTION_CERTIFICATION.md` instead.
+> ⚠️ `PRODUCTION_CERTIFICATION.md` in the repo root has been **revoked** — refer to `PRODUCTION_CERTIFICATION_STATUS.md` instead.
 
 ---
 
@@ -181,7 +182,7 @@ data-service2.0/
 │   └── versions/         Migration scripts
 │
 ├── docker/               Docker Compose override files and scripts
-├── scripts/              Admin scripts (load_fno_instrument_master.py, populate_exchange_calendar.py, backfill_india_1y.py, etc.)
+├── scripts/              Admin scripts (load_fno_instrument_master.py, populate_exchange_calendar.py, backfill_india_1y.py, backfill_india_5y.py, load_fo_bhavcopy_5y.py, seed_fo_universe.py, deploy.sh, etc.)
 ├── docs/                 Extended documentation
 │   └── DATA_SERVICE_GUIDE.md  ← this file
 │
@@ -415,10 +416,10 @@ Consumer
 | Service | Role | Key processes |
 |---|---|---|
 | `api` | REST + WebSocket server | 4 Uvicorn workers, all API routes, WebSocket fan-out |
-| `worker` | Background data jobs | Backfill, gap recovery, cross-provider reconciliation |
-| `scheduler` | Cron jobs | F&O universe refresh at 08:45 IST, Angel One JWT rotation at 23:55 IST |
-| `redis` | Shared state | L2 cache (mds: namespace), Event Bus (Redis Streams), circuit-breaker state, backfill checkpoints |
-| `postgres` | Persistent storage | OHLCV candles, provenance records, instruments, gaps, incidents |
+| `worker` | Continuous OHLCV catch-up + background data jobs | Startup pass + EOD 17:00 IST + intraday 4h; gap recovery; reconciliation |
+| `scheduler` | Cron jobs | F&O universe refresh at 08:45 IST, EOD catchup at 17:00 IST, Angel One JWT rotation at 23:55 IST, intraday catchup every 4h |
+| `redis` | Shared state | L2 cache (mds: namespace), Event Bus (Redis Streams), circuit-breaker state, OHLCV checkpoints |
+| `postgres` | Persistent storage | equity_candle (~123M), futures_candle (246K+), options_candle (242K+), continuous_futures (131K), fo_universe (314), provenance, instruments |
 
 ---
 
@@ -431,19 +432,23 @@ Consumer
 | Live quote | `GET /v1/india/quotes/{symbol}` | Scrapling/NSE, Angel One SmartAPI | 500ms p99 publish latency |
 | Batch live quotes | `GET /v1/india/quotes/batch?symbols=...` | Same | Up to 200 symbols per request |
 | Option chain | `GET /v1/india/option-chain` | Scrapling/NSE, Angel One | IV/Greeks/bid/ask are null when absent |
-| Historical OHLCV | `GET /v1/india/historical` | Angel One, Upstox, OpenChart, Jugaad-data | Max 10K candles per response |
+| Historical OHLCV (equity) | `GET /v1/india/historical` | Angel One, Upstox V3, OpenChart, Jugaad-data | Max 10K candles per response; ~123M rows in DB |
+| Historical OHLCV (F&O bhavcopy) | DB-backed via `futures_candle`/`options_candle` | NSE Bhavcopy daily files | 246K futures + 242K options rows, Sep 2021 → live |
+| Continuous futures | DB-backed via `continuous_futures` | Computed from bhavcopy | 131K rows, 305 underlyings, Sep 2021 → Sep 2026 |
 | Market session | `GET /v1/india/market/status` | Internal (IST clock + holiday calendar) | 6 session phases |
 | Gap records | `GET /v1/india/historical/gaps` | Internal | PENDING/RECOVERING/RECOVERED/EXHAUSTED |
 | Reconciliation | `GET /v1/india/historical/reconciliation` | Internal | CONFIRMED/MINOR_DISCREPANCY/MAJOR_DISCREPANCY |
-| Broker PCR | `GET /v1/india/broker-analytics/pcr` | Angel One SmartAPI | AlphaForge-specific |
-| OI buildup | `GET /v1/india/broker-analytics/oi-buildup` | Angel One SmartAPI | |
-| Gainers/losers | `GET /v1/india/broker-analytics/gainers-losers` | Angel One SmartAPI | |
+| Broker PCR | `GET /v1/broker-analytics/pcr` | Angel One SmartAPI | AlphaForge-specific |
+| OI buildup | `GET /v1/broker-analytics/oi-buildup` | Angel One SmartAPI | |
+| Gainers/losers | `GET /v1/broker-analytics/gainers-losers` | Angel One SmartAPI | |
+| F&O universe | `GET /v1/instruments/fno-universe` | fo_universe DB table | 314 rows (293 active) |
 
 ### Supported Intervals (Indian)
 
 `1m`, `5m`, `10m`, `15m`, `30m`, `1h`, `1d`, `1w`, `1M`
 
 > ⛔ `3m` is **permanently banned** for all Indian market data endpoints at every layer.
+> ⚠️ `NSE_INDEX` instruments (NIFTY 50, NIFTY BANK, etc.) support `1m`–`1h` via Angel One only. Upstox returns `UDAPI100011` for index intraday. `MIDCPNIFTY` is unavailable on Upstox at any interval.
 
 ### Crypto Markets
 
@@ -1080,12 +1085,77 @@ Returns the most recent available data (≤ 24 hours old) with:
 
 ### Backfill Routing (Capability Matrix)
 
-| Instrument type | Interval | Primary source |
-|---|---|---|
-| Equity | 1m (multi-day) | Angel One SmartAPI |
-| Index | 1m–1h | Upstox V3 |
-| All | 1d EOD with OI | Jugaad-data |
-| All | Any interval | OpenChart (reconciliation + fallback) |
+| Instrument type | Interval | Primary source | Notes |
+|---|---|---|---|
+| Equity (EQ) | `1m`–`1h` | Angel One SmartAPI (Nifty50) / Upstox V3 (F&O universe) | Nifty50: full 5y; F&O universe: ~2y (Upstox plan limit) |
+| Index (IDX) | `1m`–`1h` | **Angel One SmartAPI only** | Upstox returns UDAPI100011 for index intraday (fixed 2026-09-22) |
+| Equity + Index | `1d`/`1w`/`1M` | Upstox V3 | All 298 instruments; 5y range |
+| F&O Futures | `1d` (bhavcopy) | NSE Bhavcopy daily files | 246,986 rows; Sep 2021 → live |
+| F&O Options | `1d` (bhavcopy) | NSE Bhavcopy daily files | 242,255 rows; Sep 2021 → live |
+| All | Any interval | OpenChart (reconciliation + fallback) | |
+
+### Continuous OHLCV Catch-Up Worker
+
+The `worker` service runs `src/worker_tasks/ohlcv_catchup.py` which keeps all candle tables up-to-date automatically:
+
+- **Startup pass** — fires immediately when the worker container starts to close any gap since the last run.
+- **EOD pass** — daily at 17:00 IST; fetches `1d`/`1w`/`1M` candles for all instruments.
+- **Intraday pass** — every `CATCHUP_INTRADAY_INTERVAL` hours (default 4h); fetches `1m`–`1h`.
+- **Instrument source** — reads from the `fo_universe` DB table with priority FO→IDX→EQ. Falls back to static `ALL_SPOT` list if `fo_universe` is empty.
+- **IDX intraday** — skipped entirely in the intraday pass (Upstox returns 400; routed to Angel One when called directly via HistoricalEngine).
+- **Checkpoint-aware** — calls `HistoricalEngine.run_backfill()` which advances `from_ts` to the Redis checkpoint, avoiding redundant fetches.
+
+```bash
+# Check catch-up status (days behind per interval)
+make catchup-status
+
+# Tail worker logs to see catch-up activity
+make worker-logs
+
+# Manually trigger a data report
+make data-report
+```
+
+### F&O Universe (`fo_universe` table)
+
+The `fo_universe` table is the master F&O instrument registry, seeded by `scripts/seed_fo_universe.py`:
+
+| Column | Description |
+|---|---|
+| `instrument_id` | Canonical ID (e.g. `RELIANCE`) |
+| `symbol` | NSE ticker symbol |
+| `company_name` | Full company name |
+| `isin` | ISIN code (used for Upstox `NSE_EQ|ISIN` key) |
+| `exchange` | `NSE` or `BSE` |
+| `instrument_class` | `EQ`, `IDX`, `FUT`, `OPT`, `ETF` |
+| `sector` | NSE sector classification |
+| `is_index` | Boolean |
+| `backfill_priority` | Integer — lower = higher priority (1=index futures, 2=stock futures, 3=indices, 4=Nifty50, 5=others) |
+| `fo_listed_date` / `fo_delisted_date` | F&O listing/delisting dates |
+| `is_fo_active` | Boolean — current F&O eligibility |
+
+**Seed command:**
+```bash
+make seed-fo-universe        # or: python scripts/seed_fo_universe.py
+```
+
+### NSE Bhavcopy Data Loading
+
+NSE F&O daily data (futures + options settlement prices) is loaded via the bhavcopy loader:
+
+```bash
+# Load F&O bhavcopy 5y → futures_candle + options_candle
+make load-fno
+
+# Dry-run (no DB writes)
+make load-fno-dry
+```
+
+The loader uses a dual-path strategy:
+- **Pre-2024**: `pybhav` library (NSE retired legacy URLs in Jan 2024)
+- **2024+**: Direct URL `BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip`
+
+ON CONFLICT: `DO NOTHING` — idempotent. Safe to re-run.
 
 ### Chunk Sizes
 
@@ -1244,6 +1314,47 @@ Configure via `OTEL_EXPORTER`:
 - Python 3.11 or 3.12
 - Docker Desktop with Compose V2
 - `pip` or `uv` (uv is faster)
+
+### Makefile — Primary Interface
+
+The project ships a `Makefile` as the primary interface for all developer operations. It auto-detects the env file (`.env.local` → `.env.production` → `.env`). Override with `make up ENV_FILE=.env.production`.
+
+```bash
+# Infrastructure
+make up              # Build + start all services
+make down            # Stop all services
+make build           # Rebuild Docker image
+make ps              # Container status
+make logs            # Follow all logs
+make api-logs        # Follow API logs
+make worker-logs     # Follow worker logs (OHLCV catch-up activity)
+
+# Database
+make migrate                 # Apply all pending Alembic migrations
+make migration MSG="describe" # Generate a new migration
+make db-shell                # Open psql shell
+make catchup-status          # Show latest candle date per interval + days_behind
+
+# Data loading
+make seed-fo-universe   # Seed fo_universe table (314 instruments)
+make load-fno           # Load F&O bhavcopy 5y → futures_candle + options_candle
+make load-fno-dry       # Dry-run bhavcopy load
+make backfill-5y        # Run 5-year OHLCV backfill (ALL_SPOT instruments)
+make data-report        # Print live data summary (row counts, date ranges)
+
+# Testing & quality
+make test          # Run unit tests
+make test-all      # Full suite (unit + property + perf + integration)
+make lint          # ruff check
+make format        # ruff format
+make typecheck     # mypy
+
+# Deployment
+make deploy              # Build + rolling restart + health check
+make deploy-no-cache     # Force full Docker layer rebuild
+make setup-autodeploy    # Install git post-push hook
+make start-webhook       # Start webhook server for CI/CD triggers
+```
 
 ### First-Time Setup
 
@@ -1411,7 +1522,7 @@ Pass `APP_ENV=production` as an environment variable; inject secrets via your se
 
 ### Pre-Deployment Checklist
 
-- [ ] `alembic upgrade head` runs successfully
+- [ ] `alembic upgrade head` runs successfully (current HEAD: `20260920_000000`)
 - [ ] `GET /v1/health/ready` returns HTTP 200
 - [ ] Unit test suite passes with zero failures: `pytest tests/unit/ -q`
 - [ ] `CORS_ALLOWED_ORIGINS` is set to your consumer origin(s), not `*`
@@ -1420,6 +1531,9 @@ Pass `APP_ENV=production` as an environment variable; inject secrets via your se
 - [ ] Provider credentials are injected from your secrets manager, not as plaintext in `.env.production`
 - [ ] `ENVIRONMENT=production` (disables Swagger UI)
 - [ ] `.env.production` is in `.gitignore` and not committed
+- [ ] `fo_universe` table seeded — run `make seed-fo-universe` after first migration
+- [ ] Worker service running — `make worker-logs` shows OHLCV catch-up activity
+- [ ] `CATCHUP_*` env vars present in `docker-compose.yml` environment blocks
 
 ### Graceful Shutdown (SIGTERM)
 

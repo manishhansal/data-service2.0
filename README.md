@@ -10,16 +10,18 @@
 **Standalone, production-grade Market Data Platform.**  
 Single market-data authority for AlphaForge. Every market data request flows through this service — no consumer calls an external provider directly.
 
-**Version 2.1.0** · 4,413 unit tests · 5,460,561 equity candles · market_quote + option_greeks + option_chain persistence active
+**Version 2.2.0** · 4,821+ unit tests · ~123M equity candles · 246K futures + 242K options (bhavcopy 5y) · 131K continuous futures · 314-row `fo_universe` registry · continuous OHLCV catch-up worker active
 
 | Document | Purpose |
 |---|---|
 | [`docs/DATA_SERVICE_GUIDE.md`](docs/DATA_SERVICE_GUIDE.md) | Full technical deep-dive: all components, configuration, troubleshooting |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Complete API reference — 61 endpoints across 14 functional groups |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, module map, data flow diagrams (v2.1.0) |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, module map, data flow diagrams (v2.2.0) |
 | [`ALPHAFORGE_DATA_REQUIREMENTS.md`](ALPHAFORGE_DATA_REQUIREMENTS.md) | AlphaForge integration contract and null semantics |
-| [`FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) | **Current** runtime certification — live evidence 2026-09-17 |
-| [`CHANGELOG.md`](CHANGELOG.md) | Version history — v2.1.0 pipeline fixes + Upstox V3 migration |
+| [`ML_DATA_CERTIFICATION.md`](ML_DATA_CERTIFICATION.md) | **Current** ML & Production data certification — v3.0, live DB evidence 2026-09-22 |
+| [`PRODUCTION_CERTIFICATION_STATUS.md`](PRODUCTION_CERTIFICATION_STATUS.md) | **Current** runtime certification status — all tiers, live evidence 2026-09-22 |
+| [`ANGELONE_UPSTOX_FINAL_CERTIFICATION.md`](ANGELONE_UPSTOX_FINAL_CERTIFICATION.md) | Angel One + Upstox provider certification |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history — v2.2.0 data pipeline + v2.1.0 Upstox V3 migration |
 | [`reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md`](reports/FINAL_PROVIDER_RUNTIME_CERTIFICATION.md) | Detailed runtime certification with all bug fixes |
 | [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) | P0 blocker resolution record (2026-09-15) |
 | [`.env.example`](.env.example) | Annotated reference for every environment variable |
@@ -44,10 +46,11 @@ Single market-data authority for AlphaForge. Every market data request flows thr
 13. [Database Migrations](#13-database-migrations)
 14. [Running Tests](#14-running-tests)
 15. [Code Quality](#15-code-quality)
-16. [Deployment](#16-deployment)
-17. [Auto-Deploy on Git Push](#17-auto-deploy-on-git-push)
-18. [Observability](#18-observability)
-19. [Troubleshooting](#19-troubleshooting)
+16. [Makefile Reference](#16-makefile-reference)
+17. [Deployment](#17-deployment)
+18. [Auto-Deploy on Git Push](#18-auto-deploy-on-git-push)
+19. [Observability](#19-observability)
+20. [Troubleshooting](#20-troubleshooting)
 
 ---
 
@@ -205,6 +208,8 @@ data-service-redis       Up (healthy)    6379/tcp
 data-service-postgres    Up (healthy)    0.0.0.0:5444->5432/tcp
 ```
 
+The `worker` service runs the continuous OHLCV catch-up task — it fetches missing candles for every instrument × interval pair from the last Redis checkpoint to today. EOD pass runs at 17:00 IST; intraday pass runs every 4 hours (configurable via `CATCHUP_INTRADAY_INTERVAL`).
+
 ---
 
 ## 5. View Logs
@@ -253,13 +258,14 @@ docker compose --env-file .env.local logs -t --tail=50
 A successful startup logs these events in order:
 
 ```
-data_service_starting      version=2.0.0
+data_service_starting      version=2.2.0
 redis_connected            url=redis://redis:6379/0
 postgres_connected
 angel_one_adapter_authenticated   provider=angel_one      ← if credentials set
 upstox_adapter_ready              provider=upstox         ← if credentials set
 market_engine_ready        real_provider=true
-data_service_ready         version=2.0.0
+ohlcv_catchup_worker_started      startup_pass=true
+data_service_ready         version=2.2.0
 ```
 
 If `angel_one_credentials_not_configured` or `upstox_credentials_not_configured` appear, the service still runs but those data sources return degraded/null responses.
@@ -526,7 +532,7 @@ Supported intervals: `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` — **`3m` 
 │  External Data Providers                                        │
 │  Angel One SmartAPI · Upstox V3 · NSE Scrapling · Yahoo Finance │
 │  Jugaad-data · OpenChart · Binance REST/WS · Delta Exchange     │
-│  Deribit REST                                                    │
+│  Deribit REST · NSE Bhavcopy (pybhav + direct URL)             │
 └───────────────────────┬─────────────────────────────────────────┘
                         │
                         ▼
@@ -535,6 +541,7 @@ Supported intervals: `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` — **`3m` 
           │  Capability Matrix      │
           │  Circuit Breakers (5f)  │
           │  Token-Bucket Rate Limiter│
+          │  Angel→Upstox auto-fallback│
           └───────────┬─────────────┘
                       │
                       ▼
@@ -545,8 +552,9 @@ Supported intervals: `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` — **`3m` 
           │  GapRecovery    (state machine)    │
           │  StreamingEngine (tick fan-out)    │
           │  QualityEngine  (DCS + gate)       │
-          │  InstrumentMaster + F&O Universe   │
+          │  InstrumentMaster + fo_universe    │
           │  HolidayCalendar + SessionStateMachine│
+          │  TradingCalendarService (DB-backed)│
           └───────────┬───────────────────────┘
                       │
                       ▼
@@ -566,6 +574,11 @@ Supported intervals: `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` — **`3m` 
           │  L2: Redis 7 (512 MB)       │
           │  L3: PostgreSQL 15          │
           │      + TimescaleDB          │
+          │  equity_candle ~123M rows   │
+          │  futures_candle 246K rows   │
+          │  options_candle 242K rows   │
+          │  continuous_futures 131K    │
+          │  fo_universe 314 rows       │
           └───────────┬──────────────────┘
                       │
                       ▼
@@ -578,7 +591,9 @@ Supported intervals: `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` — **`3m` 
           └──────────────────────────────┘
 ```
 
-**5 Docker Compose services**: `api` (8200), `worker`, `scheduler`, `redis`, `postgres` (5444 on host).
+**5 Docker Compose services**: `api` (8200), `worker` (OHLCV catch-up), `scheduler` (EOD + JWT rotation), `redis`, `postgres` (5444 on host).
+
+**Background worker**: The `worker` service runs a continuous OHLCV catch-up task that keeps all candle tables up-to-date. It uses the `fo_universe` table (FO→IDX→EQ priority order) to determine the instrument universe and calls `HistoricalEngine.run_backfill()` from the last Redis checkpoint forward. EOD pass: daily at 17:00 IST. Intraday pass: every 4 hours (configurable).
 
 Full architecture reference: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
@@ -586,17 +601,21 @@ Full architecture reference: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## 10. Market Data Coverage
 
-| Market | Source(s) | Instruments | Intervals |
-|---|---|---|---|
-| **NSE Live** | Angel One SmartAPI | Equities, F&O, Indices | Tick / real-time |
-| **NSE Historical** | Upstox V3, Angel One | Equities, F&O, Indices | `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` |
-| **NSE Open-source** | Yahoo Finance, Jugaad-data, OpenChart, NSE Scrapling | Equities, Indices | `1d` and select intraday |
-| **Crypto Spot** | Binance REST + WS | BTC, ETH, SOL and others | `1m`–`1d` (incl. `3m`) |
-| **Crypto Futures** | Binance Futures REST | Perpetuals | Mark price, funding, OI, L/S |
-| **Crypto Options** | Deribit REST | BTC, ETH, SOL options | IV, OI, max pain, PCR |
-| **Crypto Spot India** | Delta Exchange India REST | All Delta products | OHLCV, ticker |
+| Market | Source(s) | Instruments | Intervals | Historical Depth |
+|---|---|---|---|---|
+| **NSE Equity Live** | Angel One SmartAPI | Equities, Indices | Tick / real-time | — |
+| **NSE Equity Historical** | Upstox V3, Angel One | 298 instruments | `1m` `5m` `10m` `15m` `30m` `1h` `1d` `1w` `1M` | Nifty50: 5y intraday; F&O universe: ~2y intraday (Upstox limit); all: 5y EOD |
+| **NSE F&O Historical (bhavcopy)** | NSE Bhavcopy daily file | 286–304 underlyings | `1d` | Sep 2021 → live (246K futures + 242K options rows) |
+| **NSE Continuous Futures** | Computed roll | 305 underlyings | `1d` | Sep 2021 → Sep 2026 (131K rows) |
+| **NSE Open-source** | Yahoo Finance, Jugaad-data, OpenChart, NSE Scrapling | Equities, Indices | `1d` and select intraday | Varies by provider |
+| **Crypto Spot** | Binance REST + WS | BTC, ETH, SOL and others | `1m`–`1d` (incl. `3m`) | — |
+| **Crypto Futures** | Binance Futures REST | Perpetuals | Mark price, funding, OI, L/S | — |
+| **Crypto Options** | Deribit REST | BTC, ETH, SOL options | IV, OI, max pain, PCR | — |
+| **Crypto Spot India** | Delta Exchange India REST | All Delta products | OHLCV, ticker | — |
 
 > ⛔ `3m` is **permanently unsupported for Indian market data** at every layer — API, normaliser, DB constraint, and engine. Binance/Delta crypto explicitly allows `3m`.
+
+> ⚠️ **NSE Index intraday via Upstox**: `NSE_INDEX` instruments (`NIFTY 50`, `NIFTY BANK`, etc.) are served at `1d`/`1w`/`1M` only via Upstox. Intraday (`1m`–`1h`) for indices routes to Angel One automatically. `MIDCPNIFTY` (Nifty Midcap Select) is not available on Upstox at any interval and always falls back to Angel One.
 
 ---
 
@@ -673,6 +692,32 @@ docker compose --env-file .env.local exec postgres \
     WHERE instrument_id = 'RELIANCE' AND interval_str = '1d'
       AND time >= '2026-09-01'
     ORDER BY time;"
+
+# NSE F&O bhavcopy futures (latest 10)
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT instrument_id, time, open, high, low, close, expiry_date
+    FROM futures_candle
+    ORDER BY time DESC
+    LIMIT 10;"
+
+# Continuous futures for NIFTY (latest 20 daily rows)
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT symbol, date, open, high, low, close, roll_date
+    FROM continuous_futures
+    WHERE symbol = 'NIFTY'
+    ORDER BY date DESC
+    LIMIT 20;"
+
+# F&O universe — active instruments
+docker compose --env-file .env.local exec postgres \
+  psql -U mds_user -d mds -c "
+    SELECT symbol, instrument_class, sector, backfill_priority
+    FROM fo_universe
+    WHERE is_fo_active = true
+    ORDER BY backfill_priority, symbol
+    LIMIT 20;"
 
 # Check applied Alembic migrations
 docker compose --env-file .env.local exec postgres \
@@ -817,7 +862,64 @@ All three tools are pre-configured in `pyproject.toml`.
 
 ---
 
-## 16. Deployment
+## 16. Makefile Reference
+
+A `Makefile` is included as the primary developer interface for all common operations. It auto-detects the active env file (`.env.local` → `.env.production` → `.env`). Override with `make up ENV_FILE=.env.production`.
+
+### Infrastructure
+
+```bash
+make up           # Start all services (build + up -d)
+make down         # Stop all services (volumes preserved)
+make build        # Rebuild the Docker image
+make ps           # Show container status
+make logs         # Follow all service logs
+make api-logs     # Follow api container logs
+make worker-logs  # Follow worker container logs (shows catch-up activity)
+```
+
+### Database & Migrations
+
+```bash
+make migrate           # Apply all pending Alembic migrations
+make migration MSG="describe change"  # Generate a new migration
+make db-shell          # Open psql shell
+make db-status         # Show alembic current + row counts
+make catchup-status    # Show latest candle date per interval (days_behind)
+```
+
+### Data Loading & Backfill
+
+```bash
+make seed-fo-universe    # Seed fo_universe table (314 instruments)
+make load-fno            # Load F&O bhavcopy 5y → futures_candle + options_candle
+make load-fno-dry        # Dry-run bhavcopy load (no DB writes)
+make backfill-5y         # Run 5-year OHLCV backfill (ALL_SPOT instruments)
+make data-report         # Print live data summary (row counts, date ranges)
+```
+
+### Testing & Quality
+
+```bash
+make test          # Run unit tests
+make test-all      # Run full suite (unit + property + perf + integration)
+make lint          # ruff check
+make format        # ruff format
+make typecheck     # mypy
+```
+
+### Deployment
+
+```bash
+make deploy                  # Build + rolling restart + health check
+make deploy-no-cache         # Force full Docker layer rebuild
+make setup-autodeploy        # Install git post-push hook
+make start-webhook           # Start webhook server for CI/CD triggers
+```
+
+---
+
+## 17. Deployment
 
 ### Production Docker Compose
 
@@ -840,7 +942,7 @@ curl http://your-server:8200/v1/health/live
 
 ### Pre-deploy checklist
 
-- [ ] `alembic upgrade head` succeeds
+- [ ] `alembic upgrade head` succeeds (includes `20260919`, `20260920`, `20260918` migrations)
 - [ ] `GET /v1/health/ready` returns 200
 - [ ] `pytest tests/unit/ -q` passes (0 failures)
 - [ ] `CORS_ALLOWED_ORIGINS` is set (no wildcard `*`)
@@ -849,6 +951,8 @@ curl http://your-server:8200/v1/health/live
 - [ ] `POSTGRES_PASSWORD` is a strong password (not the dev placeholder)
 - [ ] `.env.production` is **not** committed to version control
 - [ ] Provider credentials are set (Angel One, Upstox) or accepted as degraded
+- [ ] `fo_universe` table seeded — run `make seed-fo-universe` after first migration
+- [ ] Worker service is running — `make worker-logs` shows OHLCV catch-up activity
 
 ### Scaling
 
@@ -859,7 +963,7 @@ docker compose --env-file .env.production up -d --scale api=3
 
 ---
 
-## 17. Auto-Deploy on Git Push
+## 18. Auto-Deploy on Git Push
 
 The project ships a full auto-deploy system that rebuilds and redeploys the Docker stack automatically after every `git push` to `main`.
 
@@ -942,7 +1046,7 @@ Full documentation: [`docker/README-autodeploy.md`](docker/README-autodeploy.md)
 
 ---
 
-## 18. Observability
+## 19. Observability
 
 | Signal | Endpoint / Method | Details |
 |---|---|---|
@@ -954,7 +1058,7 @@ Full documentation: [`docker/README-autodeploy.md`](docker/README-autodeploy.md)
 
 ---
 
-## 19. Troubleshooting
+## 20. Troubleshooting
 
 ### Container keeps restarting
 
@@ -1034,12 +1138,15 @@ docker compose --env-file .env.local exec redis redis-cli ping
 
 | Document | Contents |
 |---|---|
-| [`docs/DATA_SERVICE_GUIDE.md`](docs/DATA_SERVICE_GUIDE.md) | Complete technical reference: all 25 sections covering every subsystem |
+| [`docs/DATA_SERVICE_GUIDE.md`](docs/DATA_SERVICE_GUIDE.md) | Complete technical reference: all 25+ sections covering every subsystem |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Full API reference — 61 endpoints, all params, response shapes |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, module map, data flow, provider routing |
 | [`docs/ALPHAFORGE_INDIAN_DATA_CONSUMER_CONTRACT.md`](docs/ALPHAFORGE_INDIAN_DATA_CONSUMER_CONTRACT.md) | AlphaForge integration contract for Indian data |
 | [`ALPHAFORGE_DATA_REQUIREMENTS.md`](ALPHAFORGE_DATA_REQUIREMENTS.md) | Full AlphaForge integration contract and null-semantics obligations |
-| [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) | Authoritative production-readiness certification |
+| [`ML_DATA_CERTIFICATION.md`](ML_DATA_CERTIFICATION.md) | ML & Production data certification v3.0 — full schemas, sample data, availability dates (2026-09-22) |
+| [`PRODUCTION_CERTIFICATION_STATUS.md`](PRODUCTION_CERTIFICATION_STATUS.md) | Authoritative production-readiness and runtime certification |
+| [`ANGELONE_UPSTOX_FINAL_CERTIFICATION.md`](ANGELONE_UPSTOX_FINAL_CERTIFICATION.md) | Angel One + Upstox provider integration certification |
+| [`reports/20_FINAL_PRODUCTION_CERTIFICATION.md`](reports/20_FINAL_PRODUCTION_CERTIFICATION.md) | P0 blocker resolution record (2026-09-15) |
 | [`reports/18_RCA_AND_FIXES.md`](reports/18_RCA_AND_FIXES.md) | Root-cause analysis for all known issues and applied fixes |
 | [`.env.example`](.env.example) | Annotated reference for all 50+ environment variables |
 | [`.kiro/specs/data-service-platform/requirements.md`](.kiro/specs/data-service-platform/requirements.md) | Full 23-requirement specification |
