@@ -475,9 +475,15 @@ class TestGetFnoUniverse:
     """Tests for GET /v1/instruments/fno-universe (Requirements 2.6, 2.9, 11.5)."""
 
     @pytest.mark.asyncio
-    async def test_503_when_no_snapshot_cached(self) -> None:
-        """HTTP 503 with FNO_UNIVERSE_UNAVAILABLE when no snapshot is cached."""
-        app = _make_app()
+    async def test_503_database_unavailable_when_cache_cold_and_no_engine(self) -> None:
+        """Cache cold + no DB engine → 503 DATABASE_UNAVAILABLE (§9).
+
+        When neither the in-memory cache nor a DB engine is available, the
+        endpoint cannot distinguish "empty universe" from "not-yet-loaded",
+        so it reports the honest availability state rather than a misleading
+        empty universe.
+        """
+        app = _make_app(db_engine=None)
 
         with patch(
             "src.engines.fno_universe.FnoUniverseService.get_cached_snapshot",
@@ -487,8 +493,97 @@ class TestGetFnoUniverse:
 
         assert response.status_code == 503
         body = response.json()
-        assert body["error"]["code"] == "FNO_UNIVERSE_UNAVAILABLE"
+        assert body["error"]["code"] == "DATABASE_UNAVAILABLE"
         assert "requestId" in body["error"]
+
+    @pytest.mark.asyncio
+    async def test_503_no_universe_when_db_empty(self) -> None:
+        """Cache cold + DB reachable but empty → 503 NO_UNIVERSE (§9).
+
+        An empty universe and an unavailable universe are different states.
+        """
+        mock_engine = object()
+        app = _make_app(db_engine=mock_engine)
+
+        with patch(
+            "src.engines.fno_universe.FnoUniverseService.get_cached_snapshot",
+            return_value=None,
+        ), patch(
+            "src.engines.fno_universe.FnoUniverseService.get_current_snapshot",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            response = await _get(app, "/v1/instruments/fno-universe")
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["error"]["code"] == "NO_UNIVERSE"
+        assert "requestId" in body["error"]
+
+    @pytest.mark.asyncio
+    async def test_200_db_fallback_when_cache_cold(self) -> None:
+        """Cache cold + DB has ACTIVE snapshot → 200 served from DB fallback.
+
+        This is the exact defect that caused the production 503: a valid
+        persisted snapshot masked by an empty in-memory cache after a restart.
+        """
+        snapshot = _make_snapshot()
+        mock_engine = object()
+        app = _make_app(db_engine=mock_engine)
+
+        with patch(
+            "src.engines.fno_universe.FnoUniverseService.get_cached_snapshot",
+            return_value=None,
+        ), patch(
+            "src.engines.fno_universe.FnoUniverseService.get_current_snapshot",
+            new_callable=AsyncMock,
+            return_value=snapshot,
+        ), patch(
+            "src.engines.fno_universe.FnoUniverseService.warm_cache",
+        ) as warm, patch(
+            "src.api.instruments._load_fno_constituents",
+            new_callable=AsyncMock,
+            return_value=[
+                {"symbol": "RELIANCE", "instrumentId": "NSE:RELIANCE"},
+                {"symbol": "TCS", "instrumentId": "NSE:TCS"},
+            ],
+        ):
+            response = await _get(app, "/v1/instruments/fno-universe")
+
+        assert response.status_code == 200
+        body = response.json()
+        data = body["data"]
+        assert data["universeVersion"] == 1
+        assert data["source"] == "database"
+        assert data["availability"] == "VALID_UNIVERSE"
+        assert data["symbols"] == ["RELIANCE", "TCS"]
+        # Lifecycle status is preserved and NOT clobbered by availability.
+        assert data["status"] == "ACTIVE"
+        warm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_partial_universe_when_constituent_load_fails(self) -> None:
+        """Snapshot served but constituent enrichment fails → availability PARTIAL_UNIVERSE."""
+        snapshot = _make_snapshot()
+        mock_engine = object()
+        app = _make_app(db_engine=mock_engine)
+
+        with patch(
+            "src.engines.fno_universe.FnoUniverseService.get_cached_snapshot",
+            return_value=snapshot,
+        ), patch(
+            "src.api.instruments._load_fno_constituents",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            response = await _get(app, "/v1/instruments/fno-universe")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["data"]["availability"] == "PARTIAL_UNIVERSE"
+        assert body["data"]["coverage"] == "PARTIAL"
+        # Snapshot lifecycle status still intact.
+        assert body["data"]["status"] == "ACTIVE"
 
     @pytest.mark.asyncio
     async def test_200_with_snapshot_data(self) -> None:

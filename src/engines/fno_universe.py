@@ -504,6 +504,45 @@ class FnoUniverseService:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def warm_cache(snapshot: FnoUniverseSnapshot) -> None:
+        """Populate the in-memory snapshot cache from an authoritative source.
+
+        Used by (a) the API route's DB-fallback path and (b) the FastAPI
+        startup lifespan, so that a valid persisted snapshot is served
+        immediately after a process restart instead of returning a spurious
+        ``FNO_UNIVERSE_UNAVAILABLE`` until the next 08:45 IST refresh.
+
+        Note: this warms only the snapshot header reference.  The
+        ``_current_instrument_ids`` set is intentionally left untouched here
+        because the authoritative constituent set is resolved from the DB on
+        demand; lifecycle-diff computation still requires a full ``refresh()``.
+
+        Args:
+            snapshot: The ACTIVE snapshot loaded from the database.
+        """
+        global _current_snapshot
+        _current_snapshot = snapshot
+
+    @staticmethod
+    async def warm_cache_from_db(engine: AsyncEngine) -> Optional[FnoUniverseSnapshot]:
+        """Load the latest ACTIVE snapshot from the DB and warm the cache.
+
+        Intended to be called once during application startup.  Returns the
+        snapshot that was loaded (or ``None`` when the universe has never been
+        built), so callers can log the outcome.
+
+        Args:
+            engine: AsyncEngine for DB access.
+
+        Returns:
+            The warmed snapshot, or ``None`` if no ACTIVE snapshot exists.
+        """
+        snapshot = await FnoUniverseService.get_current_snapshot(engine)
+        if snapshot is not None:
+            FnoUniverseService.warm_cache(snapshot)
+        return snapshot
+
+    @staticmethod
     def get_cached_snapshot() -> Optional[FnoUniverseSnapshot]:
         """Return the in-memory cached snapshot (no DB round-trip)."""
         return _current_snapshot

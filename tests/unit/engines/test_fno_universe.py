@@ -1081,3 +1081,62 @@ class TestRefreshFullCycle:
 
         # Clean up
         fno_module._current_instrument_ids = set()
+
+
+# ---------------------------------------------------------------------------
+# warm_cache / warm_cache_from_db  (startup + DB-fallback support)
+# ---------------------------------------------------------------------------
+
+
+class TestWarmCache:
+    """Tests for the cache-warming helpers that back the endpoint DB fallback."""
+
+    def test_warm_cache_populates_in_memory_snapshot(self):
+        """warm_cache sets the in-memory snapshot without any DB round-trip."""
+        FnoUniverseService.reset_cache()
+        assert FnoUniverseService.get_cached_snapshot() is None
+
+        snap = _make_snapshot(version=3)
+        FnoUniverseService.warm_cache(snap)
+
+        cached = FnoUniverseService.get_cached_snapshot()
+        assert cached is not None
+        assert cached.snapshotVersion == 3
+        FnoUniverseService.reset_cache()
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_from_db_loads_active_snapshot(self):
+        """warm_cache_from_db reads the ACTIVE snapshot and warms the cache."""
+        FnoUniverseService.reset_cache()
+        snapshot_row = {
+            "snapshot_version": 5,
+            "checksum": "deadbeef",
+            "generated_at": datetime.now(tz=timezone.utc),
+            "effective_from": date.today(),
+            "effective_to": None,
+            "fno_equity_count": 220,
+            "fno_index_count": 4,
+            "constituent_count": 224,
+            "status": "ACTIVE",
+        }
+        engine = _make_engine_mock(snapshot_row=snapshot_row)
+
+        result = await FnoUniverseService.warm_cache_from_db(engine)
+
+        assert result is not None
+        assert result.snapshotVersion == 5
+        assert result.constituentCount == 224
+        # Cache is warmed as a side effect.
+        assert FnoUniverseService.get_cached_snapshot() is not None
+        FnoUniverseService.reset_cache()
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_from_db_returns_none_when_empty(self):
+        """warm_cache_from_db returns None and leaves cache empty when DB is empty."""
+        FnoUniverseService.reset_cache()
+        engine = _make_engine_mock(snapshot_row=None)
+
+        result = await FnoUniverseService.warm_cache_from_db(engine)
+
+        assert result is None
+        assert FnoUniverseService.get_cached_snapshot() is None
