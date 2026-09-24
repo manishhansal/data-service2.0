@@ -351,35 +351,204 @@ async def list_instruments(
 async def get_fno_universe(request: Request) -> Response:
     """Return the current active F&O universe snapshot.
 
-    Uses ``FnoUniverseService.get_cached_snapshot()`` for an in-memory fast
-    path that avoids a DB round-trip on every request.
+    Read path (Requirement 2.6, 2.9, 11.5):
+        1. In-memory cache fast path (``FnoUniverseService.get_cached_snapshot``)
+           — avoids a DB round-trip on every request once warmed.
+        2. **DB fallback** — when the cache is cold (e.g. immediately after an
+           API process restart, before the 08:45 IST refresh has run), read
+           the authoritative ACTIVE snapshot from PostgreSQL and warm the
+           cache.  This closes the defect where a valid persisted snapshot was
+           masked by an empty in-memory cache, causing a spurious HTTP 503.
+
+    Explicit failure semantics (Requirement 2.9; ml-service phase §9):
+        - ``DATABASE_UNAVAILABLE`` (503) — the DB engine is not wired, so the
+          snapshot cannot be authoritatively confirmed.  This is distinct from
+          a genuinely empty universe.
+        - ``NO_UNIVERSE`` (503) — the DB is reachable but no snapshot has ever
+          been written.  An empty universe and an unavailable universe are
+          different states and must never both be reported as ``[]``.
 
     Returns:
-        - HTTP 200 with the snapshot in the canonical success envelope.
-        - HTTP 503 with ``FNO_UNIVERSE_UNAVAILABLE`` when no snapshot has
-          been loaded (Requirement 2.9).
+        - HTTP 200 with the snapshot + constituent symbols/metadata in the
+          canonical success envelope.
+        - HTTP 503 with an explicit failure code otherwise.
     """
     from src.engines.fno_universe import FnoUniverseService  # noqa: PLC0415
 
-    snapshot = FnoUniverseService.get_cached_snapshot()
+    req_id = _request_id()
 
+    # ── 1. In-memory fast path ────────────────────────────────────────────
+    snapshot = FnoUniverseService.get_cached_snapshot()
+    source = "cache"
+
+    # ── 2. DB fallback when the cache is cold ─────────────────────────────
+    engine = getattr(request.app.state, "db_engine", None)
     if snapshot is None:
-        return _json_response(
-            _error_envelope(
-                "FNO_UNIVERSE_UNAVAILABLE",
-                "No F&O universe snapshot has been initialised. "
-                "The snapshot is refreshed at 08:45 IST on every trading day.",
-                request_id=_request_id(),
-            ),
-            status_code=503,
-        )
+        if engine is None:
+            # We cannot distinguish "empty" from "not-yet-loaded" without the
+            # DB, so report the honest availability state rather than a
+            # misleading empty universe.
+            await _log.awarning(
+                "fno_universe_db_engine_missing",
+                component="instruments_api",
+                path="/v1/instruments/fno-universe",
+            )
+            return _json_response(
+                _error_envelope(
+                    "DATABASE_UNAVAILABLE",
+                    "F&O universe snapshot cannot be served: the database "
+                    "engine is not available, so the snapshot state cannot be "
+                    "authoritatively determined.",
+                    request_id=req_id,
+                ),
+                status_code=503,
+            )
+
+        try:
+            snapshot = await FnoUniverseService.get_current_snapshot(engine)
+        except Exception as exc:  # noqa: BLE001
+            await _log.aerror(
+                "fno_universe_db_read_failed",
+                component="instruments_api",
+                error=str(exc),
+            )
+            return _json_response(
+                _error_envelope(
+                    "DATABASE_UNAVAILABLE",
+                    "F&O universe snapshot cannot be served: the database "
+                    "read failed.",
+                    request_id=req_id,
+                ),
+                status_code=503,
+            )
+
+        if snapshot is None:
+            # DB reachable, but the universe has genuinely never been built.
+            return _json_response(
+                _error_envelope(
+                    "NO_UNIVERSE",
+                    "No F&O universe snapshot has ever been written to the "
+                    "database. The snapshot is refreshed at 08:45 IST on every "
+                    "trading day.",
+                    request_id=req_id,
+                ),
+                status_code=503,
+            )
+
+        # Warm the in-memory cache so subsequent requests hit the fast path.
+        FnoUniverseService.warm_cache(snapshot)
+        source = "database"
+
+    # ── 3. Attach constituent symbols + metadata (Requirement §8) ─────────
+    constituents: list[dict[str, Any]] = []
+    coverage = "SNAPSHOT_ONLY"
+    if engine is not None:
+        try:
+            constituents = await _load_fno_constituents(
+                engine, snapshot.snapshotVersion
+            )
+            coverage = "FULL" if constituents else "SNAPSHOT_ONLY"
+        except Exception as exc:  # noqa: BLE001
+            # Non-fatal: still serve the snapshot header, flag partial coverage.
+            await _log.awarning(
+                "fno_universe_constituents_load_failed",
+                component="instruments_api",
+                error=str(exc),
+            )
+            coverage = "PARTIAL"
+
+    payload = _snapshot_to_dict(snapshot)
+    payload["symbols"] = [c["symbol"] for c in constituents]
+    payload["instrumentMetadata"] = constituents
+    payload["coverage"] = coverage
+    payload["source"] = source
+    # ``status`` (from _snapshot_to_dict) is the snapshot *lifecycle* status
+    # (ACTIVE / SUPERSEDED) and must be preserved.  The ml-service
+    # failure-semantics *availability* state (§9) is exposed under a distinct
+    # ``availability`` key so the two concerns never collide.
+    payload["availability"] = (
+        "PARTIAL_UNIVERSE" if coverage == "PARTIAL" else "VALID_UNIVERSE"
+    )
 
     return _json_response(
         _success_envelope(
-            _snapshot_to_dict(snapshot),
+            payload,
             data_source_type="HISTORICAL",
         )
     )
+
+
+async def _load_fno_constituents(
+    engine: Any, snapshot_version: int
+) -> list[dict[str, Any]]:
+    """Load the F&O universe constituent symbols + metadata for a snapshot.
+
+    Joins ``fno_universe_membership`` (point-in-time membership rows) with
+    ``instrument_master`` to enrich each symbol with the metadata required by
+    the ml-service universe-construction contract (§8): exchange, instrument
+    type, lot/tick size, validity window, and F&O status.
+
+    Synthetic test rows (``instrument_id LIKE '%TEST%'``) are excluded so that
+    the served universe reflects only real tradeable instruments.
+
+    Args:
+        engine: AsyncEngine for DB access.
+        snapshot_version: Snapshot version whose membership set to resolve.
+
+    Returns:
+        List of constituent metadata dicts, ordered by symbol.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    sql = text(
+        """
+        SELECT m.instrument_id,
+               m.underlying,
+               m.segment,
+               m.effective_from,
+               m.effective_to,
+               m.status,
+               im.exchange,
+               im.instrument_type,
+               im.lot_size,
+               im.tick_size,
+               im.trading_symbol
+          FROM fno_universe_membership m
+          JOIN fno_universe_snapshot s
+            ON s.id = m.snapshot_id
+          LEFT JOIN instrument_master im
+            ON im.instrument_id = m.instrument_id
+         WHERE s.snapshot_version = :version
+           AND m.status = 'ACTIVE'
+           AND m.instrument_id NOT LIKE '%TEST%'
+         ORDER BY m.instrument_id ASC
+        """
+    ).bindparams(version=snapshot_version)
+
+    out: list[dict[str, Any]] = []
+    async with engine.connect() as conn:
+        result = await conn.execute(sql)
+        for row in result.mappings():
+            out.append(
+                {
+                    "symbol": row["underlying"] or row["instrument_id"],
+                    "instrumentId": row["instrument_id"],
+                    "exchange": row["exchange"],
+                    "instrumentType": row["instrument_type"],
+                    "fnoStatus": row["status"],
+                    "validFrom": (
+                        str(row["effective_from"]) if row["effective_from"] else None
+                    ),
+                    "validTo": (
+                        str(row["effective_to"]) if row["effective_to"] else None
+                    ),
+                    "lotSize": row["lot_size"],
+                    "tickSize": (
+                        float(row["tick_size"]) if row["tick_size"] is not None else None
+                    ),
+                }
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------

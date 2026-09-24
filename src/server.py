@@ -178,6 +178,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 note="Instrument lookups will return empty results",
             )
 
+    # ── FnoUniverseService — warm in-memory snapshot cache from DB ───────────
+    # The 08:45 IST scheduler job is the *update* path, but on a fresh process
+    # (or any restart after 08:45) the in-memory cache would otherwise stay
+    # empty until the next trading day, causing GET /v1/instruments/fno-universe
+    # to return a spurious 503 despite a valid persisted snapshot.  Warm it now.
+    if app.state.db_engine is not None:
+        try:
+            from src.engines.fno_universe import FnoUniverseService  # noqa: PLC0415
+            warmed = await FnoUniverseService.warm_cache_from_db(app.state.db_engine)
+            if warmed is not None:
+                await logger.ainfo(
+                    "fno_universe_cache_warmed",
+                    snapshot_version=warmed.snapshotVersion,
+                    constituent_count=warmed.constituentCount,
+                )
+            else:
+                await logger.awarning(
+                    "fno_universe_cache_empty",
+                    note="No ACTIVE snapshot in DB; endpoint will report NO_UNIVERSE",
+                )
+        except Exception as exc:  # noqa: BLE001
+            await logger.awarning("fno_universe_cache_warm_failed", error=str(exc))
+
     # ── HistoricalEngine — inject shared authenticated adapters ──────────────
     # Pre-create the HistoricalEngine and inject the shared adapter instances
     # so backfill jobs reuse the active JWT session (no new TOTP logins needed).
