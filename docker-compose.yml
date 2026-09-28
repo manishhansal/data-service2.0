@@ -50,6 +50,9 @@ services:
 
       # ── Cache ────────────────────────────────────────────────────────────
       CACHE_L1_MAX_ENTRIES: "${CACHE_L1_MAX_ENTRIES:-10000}"
+      # ── Rate limiting ────────────────────────────────────────────────────
+      CONSUMER_RATE_LIMIT: "${CONSUMER_RATE_LIMIT:-500}"
+      CONSUMER_RATE_WINDOW_SEC: "${CONSUMER_RATE_WINDOW_SEC:-60}"
 
       # ── Provider queue ───────────────────────────────────────────────────
       PROVIDER_QUEUE_MAX_DEPTH: "${PROVIDER_QUEUE_MAX_DEPTH:-100}"
