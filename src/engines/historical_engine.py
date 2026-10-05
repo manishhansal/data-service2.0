@@ -157,7 +157,11 @@ _ANGEL_ONE_KNOWN_TOKENS: dict[str, str] = {
     "TITAN":      "3506",
     "SUNPHARMA":  "3351",
     "ONGC":       "2475",
-    "TATAMOTORS": "3432",
+    # DQ-001 fix (2026-10-05): token 3432 is TATACONSUM (Tata Consumer Products).
+    # TATAMOTORS (Tata Motors regular shares) uses Angel One scrip code 3456.
+    # The DVR shares (TATAMTRDVR) use code 3432 — same as TATACONSUM collision.
+    # Source: NSE F&O instrument master, Angel One scrip codes verified 2026-10-05.
+    "TATAMOTORS": "3456",
     "TATASTEEL":  "3499",
     "NTPC":       "11630",
     "POWERGRID":  "14977",
@@ -250,6 +254,12 @@ _UPSTOX_INSTRUMENT_KEYS: dict[str, str] = {
     "TITAN":        "NSE_EQ|INE280A01028",
     "SUNPHARMA":    "NSE_EQ|INE044A01036",
     "ONGC":         "NSE_EQ|INE213A01029",
+    # DQ-001 fix (2026-10-05): INE155A01022 IS the correct ISIN for regular
+    # TATAMOTORS (Tata Motors Ltd). The ~₹295 price returned by Upstox was a
+    # transient CDN/cache issue on Sep 28-Oct 1 — not a permanent wrong mapping.
+    # INE028A01039 = BANKBARODA — do NOT use for TATAMOTORS.
+    # The Angel One token collision (3432 shared with TATACONSUM) was the real
+    # root cause of the price discrepancy in Angel One-sourced historical data.
     "TATAMOTORS":   "NSE_EQ|INE155A01022",
     "TATASTEEL":    "NSE_EQ|INE081A01020",
     "NTPC":         "NSE_EQ|INE733E01010",
