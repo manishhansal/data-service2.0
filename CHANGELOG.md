@@ -8,6 +8,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.2.3] — 2026-10-09 (DQ-001: TATAMOTORS instrument token collision)
+
+### Fixed
+- **DQ-001 TATAMOTORS token collision** — Upstox historical API was returning DVR prices (₹295) instead of regular TATAMOTORS prices (₹961) — a 226% gap that caused downstream signal DATA_ERROR in ml-service2.0. Root cause: incorrect Angel One instrument token in `_UPSTOX_INSTRUMENT_KEYS` map (token `3432` → corrected to `3456`). Fix in `src/engines/historical_engine.py`.
+
+### Impact
+- TATAMOTORS historical OHLCV data now returns regular stock price (correct)
+- ml-service2.0 re-enabled TATAMOTORS in `strategy/feature_weights.json`
+- Forward paper DATA_ERROR guard remains active as belt-and-suspenders
+
+---
+
+## [2.2.2] — 2026-09-24 (Consumer rate-limiting env vars)
+
+### Added
+- **`CONSUMER_RATE_LIMIT_REQUESTS`** env var in `docker-compose.yml` for api and worker services — configures `RateLimitMiddleware` sliding-window request count (default: 500/60s in Docker, 100/60s in code)
+- **`CONSUMER_RATE_LIMIT_WINDOW_MS`** env var — configures sliding-window duration in milliseconds (default: 60000)
+
+### Changed
+- `docker-compose.yml` now explicitly sets rate limit parameters, making them visible and overridable without code changes
+
+---
+
+## [2.2.1] — 2026-09-23 (fno-universe 503 fix + startup cache warm)
+
+### Fixed
+- **fno-universe 503 on startup** — `FnoUniverseService` was returning HTTP 503 immediately after startup if the NSE F&O fetch had not completed. Added `warm_cache_from_db()` to the lifespan startup sequence: loads last known `fo_universe` from PostgreSQL into memory cache before accepting traffic.
+- **DB fallback on NSE fetch failure** — `FnoUniverseService.get_fno_universe()` now falls back to DB cache if the NSE live fetch fails (network error, 429, etc.) rather than returning 503.
+
+### Changed
+- `src/engines/fno_universe.py` — `warm_cache_from_db()` added; `get_fno_universe()` returns DB rows on provider failure
+- `src/server.py` lifespan — `fno_universe_service.warm_cache_from_db()` called before `yield`
+
+---
+
 ## [2.2.0] — 2026-09-22 (5-year backfill campaign + continuous OHLCV catch-up worker)
 
 ### Added (data pipeline)
