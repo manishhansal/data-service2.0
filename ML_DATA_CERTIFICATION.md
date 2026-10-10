@@ -421,6 +421,14 @@ Confirmed empirically (Sep 2026): Upstox V3 `/historical-candle/{NSE_INDEX|...}/
 **Impact:** For cross-sectional models comparing F&O universe stocks, intraday features are limited to 2-year lookback for 249 of 298 instruments.  
 **Paid fix:** TrueData / iCharts (~₹5K–20K/year) — full 5y intraday for all symbols.
 
+### Gap 6 — TATAMOTORS DVR price (DQ-001) — FIXED 2026-10-09
+
+**Status: FIXED**  
+**Symptom:** Upstox historical API was returning TATAMOTORS DVR prices (~₹295) instead of regular TATAMOTORS prices (~₹961) — a 226% gap.  
+**Root cause:** Incorrect Angel One instrument token in `_UPSTOX_INSTRUMENT_KEYS` map (`3432` for TATAMOTORS-DVR instead of `3456` for regular TATAMOTORS).  
+**Fix applied (2026-10-09):** Token corrected from `3432` → `3456` in `src/engines/historical_engine.py`. All subsequent TATAMOTORS historical OHLCV requests now return regular stock prices.  
+**Action for existing data:** Historical TATAMOTORS candles fetched before this fix contain DVR prices. For ML models trained before Oct 9, either exclude TATAMOTORS or re-backfill: `make fix-tatamotors-history`.
+
 ### Gap 2 — Options intraday (1m–1h) — permanently unavailable from free sources
 
 NSE publishes only EOD bhavcopy. Broker APIs serve intraday options data only for currently-active (non-expired) contracts. Since weekly NIFTY options expire every Thursday and stock options expire monthly, virtually all historical contracts are expired and the intraday data is inaccessible.  
@@ -644,3 +652,4 @@ make catchup-status     # show latest candle date + days_behind per interval
 | 2026-09-20 | 2.0 | All gaps resolved. F&O universe expanded to 298 instruments. equity_candle 123M rows. fo_universe master table (314 rows). 301 Upstox ISIN keys mapped. Auto-fallback Angel One→Upstox. |
 | 2026-09-21 | 2.1 | Background worker deployed — auto-keeps data current. Worker-specific 400 errors: Upstox NSE_INDEX intraday not supported; MIDCPNIFTY not on Upstox; Angel One chunk reduced 90→30d for Upstox fallback compatibility. All errors resolved in v2.1. |
 | 2026-09-22 | **3.0** | **In-depth investigation report.** Full column schemas for all 5 tables with types and descriptions. Sample data rows from live DB. Confirmed data availability dates from direct DB queries. Empirically confirmed Upstox NSE_INDEX intraday limitation (all intervals 400). Documented two-cohort intraday split with exact from-dates. Worker keep-current section added with error-handling matrix. All availability ranges verified against live data. |
+| 2026-10-09 | **3.1** | **DQ-001 TATAMOTORS token fix.** Added Gap 6 documenting TATAMOTORS DVR price issue (token 3432→3456 fix in historical_engine.py, v2.2.3). Historical TATAMOTORS data fetched before Oct 9 contains DVR prices — re-backfill recommended for affected ML models. |

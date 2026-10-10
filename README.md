@@ -10,7 +10,7 @@
 **Standalone, production-grade Market Data Platform.**  
 Single market-data authority for AlphaForge. Every market data request flows through this service — no consumer calls an external provider directly.
 
-**Version 2.2.0** · 4,821+ unit tests · ~123M equity candles · 246K futures + 242K options (bhavcopy 5y) · 131K continuous futures · 314-row `fo_universe` registry · continuous OHLCV catch-up worker active
+**Version 2.2.3** · 4,821+ unit tests · ~123M equity candles · 246K futures + 242K options (bhavcopy 5y) · 131K continuous futures · 314-row `fo_universe` registry · continuous OHLCV catch-up worker active · DQ-001 TATAMOTORS token fix applied
 
 | Document | Purpose |
 |---|---|

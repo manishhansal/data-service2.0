@@ -3,12 +3,20 @@
 
 ---
 
-**Last verified:** 2026-09-22
-**Git branch:** fix/bugs (merged → origin/master via PR #4)
-**Git commit:** 96f927f (HEAD)
+**Last verified:** 2026-09-22 (2.2.0); updated 2026-10-09 (2.2.1/2.2.2/2.2.3 fixes)
+**Git branch:** fix/bugs (merged → origin/master via PR #8)
+**Git commit:** d885a4c (HEAD)
 **Test suite:** 4821+ passed, 0 failed, 6 warnings (all external)
 **Runtime environment:** Python 3.14.6, Docker stack running (all containers healthy)
 **DB migration:** alembic HEAD = 20260920_000000 (latest: `add_fo_universe_table`)
+
+### Post-2.2.0 Fixes (PRs #6–#8)
+
+| Fix | Status | Evidence |
+|-----|--------|---------|
+| fno-universe 503 — `warm_cache_from_db()` startup pre-warm | ✅ FIXED | `FnoUniverseService.warm_cache_from_db()` called at lifespan start; 314 fo_universe rows load from DB before first request accepted |
+| Consumer rate-limiting env vars in docker-compose | ✅ ADDED | `CONSUMER_RATE_LIMIT_REQUESTS`, `CONSUMER_RATE_LIMIT_WINDOW_MS` in docker-compose.yml |
+| DQ-001 TATAMOTORS instrument token collision | ✅ FIXED | `historical_engine.py`: token corrected 3432→3456; TATAMOTORS returns regular stock price (₹961 range) not DVR price (₹295) |
 
 ---
 
@@ -22,6 +30,7 @@
 | Angel One JWT in Redis | PASS | `mds:angel_one:jwt:M495775` live in Redis with active TTL | — |
 | Angel One SmartStream live | NOT VERIFIED | Requires market hours + live feedToken | BLOCKED_BY_EXTERNAL |
 | Angel One → Upstox auto-fallback | PASS | `angel_one_token_unknown_upstox_fallback` fires and re-routes; verified via 301-key ISIN map (2026-09-21) | — |
+| Upstox TATAMOTORS token (DQ-001) | PASS | Token corrected from 3432→3456 in `historical_engine.py`; regular TATAMOTORS price returned (2026-10-09 fix) | — |
 | Upstox REST (historical, LTP, option chain) | PASS | Live call 2026-09-17: RELIANCE 1243.9; option chains confirmed | — |
 | Upstox OAuth callback route | PASS | `/v1/auth/upstox/login` → redirect; `/v1/auth/upstox/callback` → code exchange → Redis store; verified 2026-09-18 | — |
 | Upstox OAuth multi-worker safety | PASS | Redis SET NX EX lock: 1/4 workers acquire, 3 blocked (live test 2026-09-18); token loading by 2 workers returns matching token | — |
@@ -47,6 +56,7 @@
 | options_candle DB (bhavcopy 1d) | PASS | 242,255 rows; 0 OHLC violations; Sep 2021 → live (loaded 2026-09-21) | — |
 | continuous_futures DB | PASS | 131,265 rows; 305 underlyings; Sep 2021 → Sep 2026 (built 2026-09-21) | — |
 | fo_universe DB | PASS | 314 rows (293 active, 21 retired); master F&O instrument registry seeded (2026-09-21) | — |
+| fno-universe startup 503 | PASS | `warm_cache_from_db()` pre-warms from 314 DB rows before first request; NSE fetch async (2026-09-23 fix) | — |
 | OHLCV catch-up worker | PASS | `src/worker_tasks/ohlcv_catchup.py` — runs on startup + EOD 17:00 IST + intraday every 4h; uses fo_universe priority order (2026-09-21) | — |
 | NSE_INDEX intraday 400 errors resolved | PASS | Upstox UDAPI100011 for NSE_INDEX intraday blocked in `_run_pass()`; routes to Angel One (2026-09-22 fix) | — |
 | market_quote persistence | PASS | 3 rows with depth (live call 2026-09-17) | — |
