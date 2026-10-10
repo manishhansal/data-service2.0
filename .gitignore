@@ -115,3 +115,6 @@ site/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
+
+# Docker environment file — container service URLs + dev secrets (never commit)
+.env.docker

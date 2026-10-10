@@ -40,8 +40,9 @@ WEBHOOK_COMPOSE := $(PROJECT_DIR)/docker/webhook/docker-compose.webhook.yml
 
 # ── Env file resolution ───────────────────────────────────────────────────────
 # Override at the command line:  make up ENV_FILE=.env.staging
-# Auto-detection order: .env.local (dev) → .env.production (server) → .env
+# Auto-detection order: .env.docker (Docker-dedicated) → .env.local (dev) → .env.production → .env
 ENV_FILE     ?= $(or \
+  $(if $(wildcard $(PROJECT_DIR)/.env.docker),.env.docker), \
   $(if $(wildcard $(PROJECT_DIR)/.env.local),.env.local), \
   $(if $(wildcard $(PROJECT_DIR)/.env.production),.env.production), \
   $(if $(wildcard $(PROJECT_DIR)/.env),.env))
@@ -52,7 +53,7 @@ ifneq ($(ENV_FILE),)
   DC := docker compose --env-file $(ENV_FILE)
 else
   DC := docker compose
-  $(warning No .env.production / .env.local / .env found — env vars must be pre-exported)
+  $(warning No .env.docker / .env.local / .env.production / .env found — env vars must be pre-exported)
 endif
 
 # ── App services (exclude stateful redis/postgres from routine restarts) ──────
